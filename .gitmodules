@@ -1,0 +1,6 @@
+[submodule "luau"]
+	path = luau
+	url = https://github.com/luau-lang/luau
+[submodule "RE-flex"]
+	path = RE-flex
+	url = https://github.com/Genivia/RE-flex
