@@ -1,11 +1,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <cstdio>
-#include <fstream>
 #include <iostream>
-#include <reflex/matcher.h>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -16,6 +14,7 @@
 #include "Luau/Location.h"
 #include "Luau/ParseOptions.h"
 #include "Luau/Parser.h"
+#include "reflex/matcher.h"
 
 static void displayHelp(const char *program_name) {
   printf("Usage: %s [file]\n", program_name);
@@ -43,9 +42,9 @@ struct State {
   std::string output;
 
   // [depth][node.name] = getLocalName(&state.totalLocals);
-  std::unordered_map<uint32_t, std::unordered_map<std::string, std::string>>
+  std::unordered_map<size_t, std::unordered_map<std::string, std::string>>
       locals;
-  uint32_t totalLocals;
+  size_t totalLocals;
 };
 
 const std::vector<const char *> luauKeywords = {
@@ -84,7 +83,7 @@ const bool isWhitespaceCharacter(char character) {
     return false;
 }
 
-std::string getLocalName(uint32_t number) {
+std::string getLocalName(size_t number) {
   std::string letters;
   while (number != 0) {
     number--;
@@ -128,14 +127,18 @@ std::string replaceAll(std::string str, const std::string &from,
 static const std::string stringSafeRegex = reflex::Matcher::convert(
     "^[A-Za-z0-9!@#$%^&*()_+| }{:\"?><\\[\\]\\;\\\\',./\\-`~=]+");
 
-void handleAstLocal(Luau::AstLocal *local, State *state, uint32_t localDepth) {
+void handleAstLocal(Luau::AstLocal *local, State *state, size_t localDepth) {
   auto name = getLocalName(state->totalLocals);
 
   state->locals[localDepth][local->name.value] = name;
   state->output.append(name);
 }
 
-void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
+void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
+  if (state->locals.find(localDepth) == state->locals.end()) {
+    state->locals[localDepth] = {};
+  };
+
   if (node->is<Luau::AstStatBlock>()) {
     // top level, list of AstStat's
     auto block = node->as<Luau::AstStatBlock>();
@@ -180,32 +183,32 @@ void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
     auto statement = node->as<Luau::AstStatLocal>();
     State newState = State{
         .output = "",
-        .locals = {},
+        .locals = state->locals,
         .totalLocals = state->totalLocals,
     };
 
-    size_t index = 0;
-    for (auto value : statement->values) {
+    // don't add more values than there are variables
+    if (statement->values.size > statement->vars.size) {
+      statement->values.size = statement->vars.size;
+    }
+
+    for (size_t index = 0; index < statement->values.size; index++) {
+      auto value = statement->values.data[index];
       handleNode(value, &newState, localDepth + 1);
       if (index < statement->values.size - 1) {
         newState.output.append(",");
       }
-
-      index++;
     }
 
-    index = 0;
+    for (size_t index = 0; index < statement->vars.size; index++) {
+      auto astLocal = statement->vars.data[index];
 
-    for (auto subNode : statement->vars) {
       state->totalLocals++;
-
-      handleAstLocal(subNode, state, localDepth + 1);
+      handleAstLocal(astLocal, state, localDepth + 1);
 
       if (index < statement->vars.size - 1) {
         state->output.append(",");
       }
-
-      index++;
     }
 
     if (statement->values.size > 0) {
@@ -216,12 +219,18 @@ void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
     addWhitespaceIfNeeded(&state->output);
   } else if (node->is<Luau::AstExprLocal>()) {
     auto expr = node->as<Luau::AstExprLocal>();
-    for (auto i = localDepth; i >= 0; i--) {
-      // extra.locals[i] && extra.locals[i][node.local.name]
-      if (state->locals.find(i) != state->locals.end() &&
-          state->locals[i].find(expr->local->name.value) !=
-              state->locals[i].end()) {
-        state->output.append(state->locals[i][expr->local->name.value]);
+
+    /*
+      Perform a backward search in order to find renamed variables in higher
+      stacks. Start at localDepth because that is the current local stack, and
+      go backward, checking each local stack if it has this local variable's
+      name.
+    */
+    for (size_t depth = localDepth; depth > 0; depth--) {
+      if (state->locals.find(depth) != state->locals.end() &&
+          state->locals[depth].find(expr->local->name.value) !=
+              state->locals[depth].end()) {
+        state->output.append(state->locals[depth][expr->local->name.value]);
         return;
       }
     }
@@ -233,7 +242,7 @@ void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
     auto assign = node->as<Luau::AstStatAssign>();
     State newState = State{
         .output = "",
-        .locals = {},
+        .locals = state->locals,
         .totalLocals = state->totalLocals,
     };
 
@@ -315,9 +324,9 @@ void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
 
     state->output.append("`");
 
-    size_t expressionsIndex = 0;
     // much of this logic is reused from AstExprConstantString
-    for (auto string : expr->strings) {
+    for (size_t index = 0; index < expr->strings.size - 1; index++) {
+      auto string = expr->strings.data[index];
       reflex::Matcher matcher(stringSafeRegex, string.data);
       size_t matches = matcher.matches();
       std::string_view matchedStringView = matcher.strview();
@@ -337,15 +346,10 @@ void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
         }
       }
 
-      // string.size == 0 means the string is over
-      if (expressionsIndex <= expr->expressions.size && string.size != 0) {
-        auto expression = expr->expressions.data[expressionsIndex];
-        state->output.append("{");
-        handleNode(expression, state, localDepth + 1);
-        state->output.append("}");
-
-        expressionsIndex++;
-      }
+      auto expression = expr->expressions.data[index];
+      state->output.append("{");
+      handleNode(expression, state, localDepth + 1);
+      state->output.append("}");
     }
 
     state->output.append("`");
@@ -443,8 +447,7 @@ void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
     addWhitespaceIfNeeded(&state->output);
     state->output.append("local ");
     state->totalLocals++;
-
-    state->output.append(local_function->name->name.value);
+    handleAstLocal(local_function->name, state, localDepth + 1);
 
     state->output.append("=");
     handleNode(local_function->func, state, localDepth + 1);
@@ -617,7 +620,37 @@ void handleNode(Luau::AstNode *node, State *state, uint32_t localDepth) {
     state->output.append("continue;");
   } else {
     // unhandled node
+    return;
   }
+}
+
+std::optional<std::string> readFile(const std::string &name) {
+  FILE *file = fopen(name.c_str(), "rb");
+
+  if (!file)
+    return std::nullopt;
+
+  fseek(file, 0, SEEK_END);
+  long length = ftell(file);
+  if (length < 0) {
+    fclose(file);
+    return std::nullopt;
+  }
+  fseek(file, 0, SEEK_SET);
+
+  std::string result(length, 0);
+
+  size_t read = fread(result.data(), 1, length, file);
+  fclose(file);
+
+  if (read != size_t(length))
+    return std::nullopt;
+
+  // Skip first line if it's a shebang
+  if (length > 2 && result[0] == '#' && result[1] == '!')
+    result.erase(0, result.find('\n'));
+
+  return result;
 }
 
 int main(int argc, char **argv) {
@@ -638,24 +671,18 @@ int main(int argc, char **argv) {
 
   const char *name = argv[1];
 
-  std::ifstream inputFile{name};
+  std::optional<std::string> fileContents = readFile(name);
 
-  if (!inputFile) {
-    std::cerr << "failed reading file " << name << std::endl;
+  if (fileContents == std::nullopt) {
+    fprintf(stderr, "failed reading file %s\n", name);
     return 1;
   }
 
-  std::string source{std::istreambuf_iterator<char>(inputFile),
-                     std::istreambuf_iterator<char>()};
-
-  std::cout << source;
+  std::string source = fileContents.value();
 
   Luau::Allocator allocator;
   Luau::AstNameTable names(allocator);
-
   Luau::ParseOptions options;
-  options.captureComments = false;
-  options.allowDeclarationSyntax = true;
 
   Luau::ParseResult parseResult = Luau::Parser::parse(
       source.data(), source.size(), names, allocator, options);
@@ -672,7 +699,7 @@ int main(int argc, char **argv) {
   }
 
   std::string output;
-  std::unordered_map<uint32_t, std::unordered_map<std::string, std::string>>
+  std::unordered_map<size_t, std::unordered_map<std::string, std::string>>
       locals;
 
   State state = {
@@ -683,7 +710,7 @@ int main(int argc, char **argv) {
 
   handleNode(parseResult.root, &state, 0);
 
-  std::cout << std::endl << state.output << std::endl;
+  std::cout << state.output << std::endl;
 
   return 0;
 }
