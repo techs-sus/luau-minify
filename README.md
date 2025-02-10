@@ -4,7 +4,7 @@ experimental C++ reimplementation of [wyatt](https://github.com/httpget)'s luau 
 
 ## Building
 
-Regular linux distrobutions:
+Regular linux distros:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
