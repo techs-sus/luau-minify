@@ -32,6 +32,7 @@
           ];
 
           packages = [
+            pkgs.hyperfine
           ];
 
           shellHook = "";
