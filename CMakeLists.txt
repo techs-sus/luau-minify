@@ -9,13 +9,17 @@ if (STATIC_CRT)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif ()
 
-# clangd
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # clangd
 
 project(Minifier LANGUAGES CXX)
 add_subdirectory(luau)
 add_subdirectory(RE-flex)
+add_library(Minifier STATIC)
 add_executable(Minifier.CLI)
+
+target_sources(Minifier PRIVATE
+    src/minifier.cpp
+)
 
 target_sources(Minifier.CLI PRIVATE
     src/main.cpp
@@ -28,10 +32,11 @@ else ()
     list(APPEND OPTIONS -Wall)
 endif ()
 
-target_compile_features(Minifier.CLI PUBLIC cxx_std_17)
-target_compile_options(Minifier.CLI PRIVATE ${OPTIONS})
-target_link_libraries(Minifier.CLI PRIVATE Luau.Ast ReflexLibStatic)
+target_compile_features(Minifier PUBLIC cxx_std_17)
+target_compile_options(Minifier PRIVATE ${OPTIONS})
+target_link_libraries(Minifier PRIVATE Luau.Ast ReflexLibStatic)
 
-set_target_properties(Minifier.CLI PROPERTIES OUTPUT_NAME luau-minify)
 target_compile_features(Minifier.CLI PUBLIC cxx_std_17)
 target_compile_options(Minifier.CLI PRIVATE ${OPTIONS})
+target_link_libraries(Minifier.CLI PRIVATE Minifier Luau.Ast)
+set_target_properties(Minifier.CLI PROPERTIES OUTPUT_NAME luau-minify)
