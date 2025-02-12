@@ -32,11 +32,11 @@ else ()
     list(APPEND OPTIONS -Wall)
 endif ()
 
-target_compile_features(Minifier PUBLIC cxx_std_17)
+target_compile_features(Minifier PUBLIC cxx_std_20)
 target_compile_options(Minifier PRIVATE ${OPTIONS})
 target_link_libraries(Minifier PRIVATE Luau.Ast ReflexLibStatic)
 
-target_compile_features(Minifier.CLI PUBLIC cxx_std_17)
+target_compile_features(Minifier.CLI PUBLIC cxx_std_20)
 target_compile_options(Minifier.CLI PRIVATE ${OPTIONS})
 target_link_libraries(Minifier.CLI PRIVATE Minifier Luau.Ast)
 set_target_properties(Minifier.CLI PROPERTIES OUTPUT_NAME luau-minify)
