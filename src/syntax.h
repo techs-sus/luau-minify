@@ -73,18 +73,18 @@ static const char *compoundSymbols[Luau::AstExprBinary::Op__Count] = {
     "~=", "==", "<", "<=", ">",  ">=", " and ", " or ",
 };
 
-inline static const bool isLuauKeyword(const char *target) {
+inline static bool isLuauKeyword(const char *target) {
   return luauKeywords.contains(target);
 };
 
-inline static const bool isWhitespaceCharacter(const char character) {
+inline static bool isWhitespaceCharacter(const char character) {
   return whitespaceCharacters.contains(character);
 }
 
 static const std::string stringSafeRegex = reflex::Matcher::convert(
     "^[A-Za-z0-9!@#$%^&*()_+| }{:\"?><\\[\\]\\;\\\\',./\\-`~=]+");
 
-inline const void addWhitespaceIfNeeded(std::string *string) {
+inline void addWhitespaceIfNeeded(std::string *string) {
   if (string->empty()) {
     return;
   }

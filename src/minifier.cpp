@@ -2,7 +2,12 @@
 #include "syntax.h"
 
 #include <Luau/Ast.h>
+#include <charconv>
+#include <cstdio>
+#include <limits>
 #include <reflex/matcher.h>
+#include <string_view>
+#include <system_error>
 
 const std::string getLocalName(size_t totalLocals) {
   std::string letters;
@@ -51,7 +56,7 @@ void handleAstLocal(Luau::AstLocal *local, State *state, size_t localDepth) {
 }
 
 void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
-  if (state->locals.find(localDepth) == state->locals.end()) {
+  if (!state->locals.contains(localDepth)) {
     state->locals[localDepth] = {};
   };
 
@@ -96,14 +101,11 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     addWhitespaceIfNeeded(&state->output);
     state->output.append("local ");
     auto statement = node->as<Luau::AstStatLocal>();
-    State newState = State{
-        .output = "",
-        .locals = state->locals,
-        .totalLocals = state->totalLocals,
-
-        .globals = state->globals,
-        .totalGlobals = state->totalGlobals,
-    };
+    State newState =
+        State{.output = "",
+              .locals = state->locals,
+              .totalLocals = state->totalLocals,
+              .global_variables_state = state->global_variables_state};
 
     // don't add more values than there are variables
     if (statement->values.size > statement->vars.size) {
@@ -145,9 +147,8 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       name.
     */
     for (size_t depth = localDepth; depth > 0; depth--) {
-      if (state->locals.find(depth) != state->locals.end() &&
-          state->locals[depth].find(expr->local->name.value) !=
-              state->locals[depth].end()) {
+      if (state->locals.contains(depth) &&
+          state->locals[depth].contains(expr->local->name.value)) {
         state->output.append(state->locals[depth][expr->local->name.value]);
         return;
       }
@@ -158,14 +159,12 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     addWhitespaceIfNeeded(&state->output);
 
     auto assign = node->as<Luau::AstStatAssign>();
-    State assignedValuesState = State{
-        .output = "",
-        .locals = state->locals,
-        .totalLocals = state->totalLocals,
+    State assignedValuesState =
+        State{.output = "",
+              .locals = state->locals,
+              .totalLocals = state->totalLocals,
 
-        .globals = state->globals,
-        .totalGlobals = state->totalGlobals,
-    };
+              .global_variables_state = state->global_variables_state};
 
     for (size_t index = 0; index < assign->values.size; index++) {
       auto value = assign->values.data[index];
@@ -200,16 +199,41 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   } else if (node->is<Luau::AstExprGlobal>()) {
     auto expr = node->as<Luau::AstExprGlobal>();
 
-    if (!state->globals.contains(expr->name.value)) {
-      state->globals[expr->name.value] = getGlobalName(state->totalGlobals);
-      state->totalGlobals++;
-    }
+    GlobalVariablesState *global_variables_state =
+        state->global_variables_state;
 
-    state->output.append(state->globals[expr->name.value]);
+    if (!state->global_variables_state->map.contains(expr->name.value)) {
+      auto globalName = getGlobalName(state->global_variables_state->total);
+      global_variables_state->map[expr->name.value] = globalName;
+      global_variables_state->total++;
+      state->output.append(globalName);
+    } else {
+      state->output.append(global_variables_state->map[expr->name.value]);
+    }
   } else if (node->is<Luau::AstExprConstantNumber>()) {
-    // TODO: Find a better way to turn a Luau double into a string
     auto expr = node->as<Luau::AstExprConstantNumber>();
-    state->output.append(std::to_string(expr->value));
+
+    if (expr->parseResult == Luau::ConstantNumberParseResult::Imprecise) {
+      state->output.append("1.7976931348623157e+308");
+    } else if (expr->parseResult ==
+                   Luau::ConstantNumberParseResult::HexOverflow ||
+               expr->parseResult ==
+                   Luau::ConstantNumberParseResult::BinOverflow) {
+      state->output.append("0xffffffffffffffff");
+    } else if (expr->parseResult == Luau::ConstantNumberParseResult::Ok) {
+      std::string characterDataBuffer(
+          std::numeric_limits<double>::max_digits10 + 2, '\0');
+
+      auto result = std::to_chars(
+          characterDataBuffer.data(),
+          characterDataBuffer.data() + characterDataBuffer.size(), expr->value);
+      if (result.ec == std::errc::value_too_large) {
+        // TODO: is this really right?
+        state->output.append("1.7976931348623157e+308");
+        return;
+      }
+      state->output.append(std::string(characterDataBuffer.data(), result.ptr));
+    };
   } else if (node->is<Luau::AstExprConstantString>()) {
     auto expr = node->as<Luau::AstExprConstantString>();
     state->output.append("\"");
@@ -441,14 +465,11 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("for ");
     state->totalLocals++;
 
-    State forLoopState{
-        .output = "",
-        .locals = state->locals,
-        .totalLocals = state->totalLocals,
+    State forLoopState{.output = "",
+                       .locals = state->locals,
+                       .totalLocals = state->totalLocals,
 
-        .globals = state->globals,
-        .totalGlobals = state->totalGlobals,
-    };
+                       .global_variables_state = state->global_variables_state};
 
     handleAstLocal(for_statement->var, &forLoopState, localDepth + 1);
     forLoopState.output.append("=");
@@ -554,16 +575,24 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 }
 
 std::string processAstRoot(Luau::AstStatBlock *root) {
-  State state = {.globals = Luau::DenseHashMap<std::string, std::string>("")};
+  GlobalVariablesState global_variables_state = {};
+
+  State state = {.global_variables_state = &global_variables_state};
+
   handleNode(root, &state, 0);
+
+  // skip emitting global glue if no globals are used
+  if (state.global_variables_state->map.empty()) {
+    return state.output;
+  }
 
   std::string globalMapOutput = "local ";
 
   size_t index = 0;
-  for (const auto &[_, translatedName] : state.globals) {
+  for (const auto &[_, translatedName] : state.global_variables_state->map) {
     globalMapOutput.append(translatedName);
 
-    if (index < state.globals.size() - 1) {
+    if (index < state.global_variables_state->map.size() - 1) {
       globalMapOutput.append(",");
     }
     index++;
@@ -574,10 +603,10 @@ std::string processAstRoot(Luau::AstStatBlock *root) {
   globalMapOutput.append("=");
 
   index = 0;
-  for (const auto &[originalName, _] : state.globals) {
+  for (const auto &[originalName, _] : state.global_variables_state->map) {
     globalMapOutput.append(originalName);
 
-    if (index < state.globals.size() - 1) {
+    if (index < state.global_variables_state->map.size() - 1) {
       globalMapOutput.append(",");
     }
     index++;

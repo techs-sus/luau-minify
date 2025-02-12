@@ -1,17 +1,29 @@
 #pragma once
 #include "Luau/Ast.h"
 #include <Luau/DenseHash.h>
+#include <cstddef>
+#include <unordered_map>
+
+typedef Luau::DenseHashMap<const char *, std::string> variable_map;
+
+struct GlobalVariablesState {
+  // [expr->name.value] = getGlobalName(self->total)
+  variable_map map = variable_map(nullptr);
+  size_t total = 0;
+};
+
+typedef Luau::DenseHashMap<size_t,
+                           std::unordered_map<const char *, std::string>>
+    deep_local_map;
 
 struct State {
-  std::string output;
+  std::string output = "";
 
   // [depth][node.name] = getLocalName(&state.totalLocals);
-  std::unordered_map<size_t, std::unordered_map<std::string, std::string>>
-      locals;
-  size_t totalLocals;
+  deep_local_map locals = deep_local_map(SIZE_MAX);
+  size_t totalLocals = 0;
 
-  Luau::DenseHashMap<std::string, std::string> globals;
-  size_t totalGlobals;
+  GlobalVariablesState *global_variables_state;
 };
 
 void handleNode(Luau::AstNode *node, State *state, size_t localDepth);
