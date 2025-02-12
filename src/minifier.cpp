@@ -2,11 +2,11 @@
 #include "syntax.h"
 
 #include <Luau/Ast.h>
+#include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <limits>
 #include <reflex/matcher.h>
-#include <string_view>
 #include <system_error>
 
 const std::string getLocalName(size_t totalLocals) {
@@ -55,13 +55,50 @@ void handleAstLocal(Luau::AstLocal *local, State *state, size_t localDepth) {
   state->output.append(name);
 }
 
+void appendConstantString(std::string *output, Luau::AstArray<char> string) {
+  reflex::Matcher matcher(stringSafeRegex, string.data);
+  std::vector<std::pair<std::pair<std::string, size_t>, bool>> blobs;
+
+  while (matcher.find() != 0) {
+    blobs.emplace_back(std::pair(matcher.text(), matcher.first()), true);
+  }
+
+  // reset the matcher, but also preserve the pattern and input data
+  matcher.input(string.data);
+
+  while (matcher.split() != 0) {
+    blobs.emplace_back(std::pair(matcher.text(), matcher.first()), false);
+  }
+
+  std::sort(blobs.begin(), blobs.end(), [](const auto &a, const auto &b) {
+    return a.first.second < b.first.second;
+  });
+
+  for (const auto &[pair, isStringSafe] : blobs) {
+    if (isStringSafe) {
+      // write all safe string data
+      output->append(replaceAll(pair.first, "\"", "\\\""));
+    } else {
+      // if any unsafe bytes are left over, manually encode them
+      for (unsigned char character : pair.first) {
+        // buffer overflow isn't possible thanks to snprintf(),
+        // but character should still be unsigned
+        char buf[5]; // \x takes 2 bytes; %02x takes 2 bytes; and null byte
+                     // overhead
+        snprintf(buf, sizeof(buf), "\\x%02x", character);
+        output->append(buf);
+      }
+    }
+  }
+}
+
 void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   if (!state->locals.contains(localDepth)) {
     state->locals[localDepth] = {};
   };
 
   if (node->is<Luau::AstStatBlock>()) {
-    // top level, list of AstStat's
+    // top level, do block, functions
     auto block = node->as<Luau::AstStatBlock>();
 
     for (auto node : block->body) {
@@ -79,8 +116,8 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     addWhitespaceIfNeeded(&state->output);
     handleNode(node->as<Luau::AstStatExpr>()->expr, state, localDepth + 1);
   } else if (node->is<Luau::AstExprCall>()) {
-    addWhitespaceIfNeeded(&state->output);
     auto call = node->as<Luau::AstExprCall>();
+    addWhitespaceIfNeeded(&state->output);
 
     handleNode(call->func, state, localDepth + 1);
 
@@ -98,10 +135,10 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 
     state->output.append(")");
   } else if (node->is<Luau::AstStatLocal>()) {
+    auto statement = node->as<Luau::AstStatLocal>();
     addWhitespaceIfNeeded(&state->output);
     state->output.append("local ");
-    auto statement = node->as<Luau::AstStatLocal>();
-    State newState =
+    State assignValuesState =
         State{.output = "",
               .locals = state->locals,
               .totalLocals = state->totalLocals,
@@ -114,9 +151,9 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 
     for (size_t index = 0; index < statement->values.size; index++) {
       auto value = statement->values.data[index];
-      handleNode(value, &newState, localDepth + 1);
+      handleNode(value, &assignValuesState, localDepth + 1);
       if (index < statement->values.size - 1) {
-        newState.output.append(",");
+        assignValuesState.output.append(",");
       }
     }
 
@@ -135,16 +172,17 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       state->output.append("=");
     }
 
-    state->output.append(newState.output);
+    state->output.append(assignValuesState.output);
     addWhitespaceIfNeeded(&state->output);
   } else if (node->is<Luau::AstExprLocal>()) {
     auto expr = node->as<Luau::AstExprLocal>();
 
     /*
-      Perform a backward search in order to find renamed variables in higher
-      stacks. Start at localDepth because that is the current local stack, and
-      go backward, checking each local stack if it has this local variable's
-      name.
+      Perform a backward search in order to find renamed variables at higher
+      depths. Start at the current depth, localDepth, and go backward, checking
+      each local stack if it has this local variable's name. Stops at the depth
+      of 0, because it is impossible for any node besides from a root
+      AstStatBlock to have a depth of 0.
     */
     for (size_t depth = localDepth; depth > 0; depth--) {
       if (state->locals.contains(depth) &&
@@ -156,9 +194,9 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 
     state->output.append("unknown");
   } else if (node->is<Luau::AstStatAssign>()) {
+    auto assign = node->as<Luau::AstStatAssign>();
     addWhitespaceIfNeeded(&state->output);
 
-    auto assign = node->as<Luau::AstStatAssign>();
     State assignedValuesState =
         State{.output = "",
               .locals = state->locals,
@@ -238,27 +276,9 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     auto expr = node->as<Luau::AstExprConstantString>();
     state->output.append("\"");
 
-    reflex::Matcher matcher(stringSafeRegex, expr->value.data);
-
-    if (expr->value.size >= 1) {
-      size_t matches = matcher.matches();
-      std::string_view matchedStringView = matcher.strview();
-
-      // write all safe string data
-      state->output.append(
-          replaceAll(std::string(matchedStringView), "\"", "\\\""));
-
-      // if any unsafe bytes are left over, manually encode them
-      if (!matches) {
-        for (size_t index = matcher.size(); index < expr->value.size; index++) {
-          // ** BUFFER OVERFLOW IF CHARACTER IS SIGNED CHAR **
-          unsigned char character = expr->value.data[index];
-          char buf[5]; // \x takes 2 bytes; %02x takes 2 bytes; and null byte
-                       // overhead
-          sprintf(buf, "\\x%02x", character);
-          state->output.append(buf);
-        }
-      }
+    if (expr->value.size != 0) {
+      appendConstantString(&state->output, expr->value);
+      return;
     }
 
     state->output.append("\"");
@@ -276,32 +296,19 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 
     state->output.append("`");
 
-    // much of this logic is reused from AstExprConstantString
-    for (size_t index = 0; index < expr->strings.size - 1; index++) {
+    for (size_t index = 0; index < expr->strings.size; index++) {
       auto string = expr->strings.data[index];
-      reflex::Matcher matcher(stringSafeRegex, string.data);
-      size_t matches = matcher.matches();
-      std::string_view matchedStringView = matcher.strview();
+      if (string.size != 0) {
+        appendConstantString(&state->output, string);
+      };
 
-      // write all safe string data
-      state->output.append(
-          replaceAll(std::string(matchedStringView), "`", "\\`"));
-
-      if (!matches) {
-        for (size_t index = matcher.size(); index < string.size; index++) {
-          // ** BUFFER OVERFLOW IF CHARACTER IS SIGNED CHAR **
-          unsigned char character = string.data[index];
-          char buf[5]; // \x takes 2 bytes; %02x takes 2 bytes; and null byte
-                       // overhead
-          sprintf(buf, "\\x%02x", character);
-          state->output.append(buf);
-        }
+      // the last string never has a corresponding expression
+      if (index != expr->strings.size - 1) {
+        auto expression = expr->expressions.data[index];
+        state->output.append("{");
+        handleNode(expression, state, localDepth + 1);
+        state->output.append("}");
       }
-
-      auto expression = expr->expressions.data[index];
-      state->output.append("{");
-      handleNode(expression, state, localDepth + 1);
-      state->output.append("}");
     }
 
     state->output.append("`");
@@ -327,6 +334,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("}");
   } else if (node->is<Luau::AstExprIndexName>()) {
     auto expr = node->as<Luau::AstExprIndexName>();
+
     handleNode(expr->expr, state, localDepth + 1);
     state->output.append(&expr->op);
     state->output.append(expr->index.value);
@@ -402,9 +410,9 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("=");
     handleNode(local_function->func, state, localDepth + 1);
   } else if (node->is<Luau::AstStatFunction>()) {
-    addWhitespaceIfNeeded(&state->output);
     auto function = node->as<Luau::AstStatFunction>();
 
+    addWhitespaceIfNeeded(&state->output);
     handleNode(function->name, state, localDepth + 1);
     state->output.append("=");
     handleNode(function->func, state, localDepth + 1);
@@ -413,16 +421,14 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 
     state->output.append("function(");
 
-    size_t index = 0;
-    for (auto arg : expr->args) {
+    for (size_t index = 0; index < expr->args.size; index++) {
+      auto arg = expr->args.data[index];
       state->totalLocals++;
       handleAstLocal(arg, state, localDepth + 3);
 
       if (index < expr->args.size - 1) {
         state->output.append(",");
       }
-
-      index += 1;
     }
 
     if (expr->vararg) {
@@ -461,6 +467,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append(")");
   } else if (node->is<Luau::AstStatFor>()) {
     auto for_statement = node->as<Luau::AstStatFor>();
+
     addWhitespaceIfNeeded(&state->output);
     state->output.append("for ");
     state->totalLocals++;
@@ -497,9 +504,8 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     addWhitespaceIfNeeded(&state->output);
     state->output.append("for ");
 
-    size_t index = 0;
-
-    for (auto var : for_in_statement->vars) {
+    for (size_t index = 0; index < for_in_statement->vars.size; index++) {
+      auto var = for_in_statement->vars.data[index];
       state->totalLocals++;
 
       handleAstLocal(var, state, localDepth + 1);
@@ -507,22 +513,17 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       if (index < for_in_statement->vars.size - 1) {
         state->output.append(",");
       }
-
-      index += 1;
     }
-
-    index = 0;
 
     addWhitespaceIfNeeded(&state->output);
     state->output.append("in ");
 
-    for (auto value : for_in_statement->values) {
+    for (size_t index = 0; index < for_in_statement->values.size; index++) {
+      auto value = for_in_statement->values.data[index];
       handleNode(value, state, localDepth + 1);
       if (index < for_in_statement->values.size - 1) {
         state->output.append(",");
       }
-
-      index += 1;
     }
 
     addWhitespaceIfNeeded(&state->output);
@@ -532,8 +533,8 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("end ");
   } else if (node->is<Luau::AstStatRepeat>()) {
     auto repeat_statement = node->as<Luau::AstStatRepeat>();
-    addWhitespaceIfNeeded(&state->output);
 
+    addWhitespaceIfNeeded(&state->output);
     state->output.append("repeat ");
 
     for (auto statement : repeat_statement->body->body) {
@@ -553,15 +554,13 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     addWhitespaceIfNeeded(&state->output);
     state->output.append("return ");
 
-    size_t index = 0;
-    for (auto node : return_statement->list) {
+    for (size_t index = 0; index < return_statement->list.size; index++) {
+      auto node = return_statement->list.data[index];
       handleNode(node, state, localDepth + 1);
 
       if (index < return_statement->list.size - 1) {
         state->output.append(",");
       }
-
-      index++;
     }
 
     state->output.append(";");
@@ -587,30 +586,23 @@ std::string processAstRoot(Luau::AstStatBlock *root) {
   }
 
   std::string globalMapOutput = "local ";
+  std::string originalNameMapping = "=";
 
   size_t index = 0;
-  for (const auto &[_, translatedName] : state.global_variables_state->map) {
+  for (const auto &[originalName, translatedName] :
+       state.global_variables_state->map) {
+    originalNameMapping.append(originalName);
     globalMapOutput.append(translatedName);
 
     if (index < state.global_variables_state->map.size() - 1) {
       globalMapOutput.append(",");
+      originalNameMapping.append(",");
     }
+
     index++;
   }
 
-  // we don't need a space because the equal sign counts as enough whitespace to
-  // produce valid code
-  globalMapOutput.append("=");
-
-  index = 0;
-  for (const auto &[originalName, _] : state.global_variables_state->map) {
-    globalMapOutput.append(originalName);
-
-    if (index < state.global_variables_state->map.size() - 1) {
-      globalMapOutput.append(",");
-    }
-    index++;
-  }
+  globalMapOutput.append(originalNameMapping);
 
   // add semicolon because identifiers are not whitespace
   globalMapOutput.append(";");

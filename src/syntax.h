@@ -82,7 +82,7 @@ inline static bool isWhitespaceCharacter(const char character) {
 }
 
 static const std::string stringSafeRegex = reflex::Matcher::convert(
-    "^[A-Za-z0-9!@#$%^&*()_+| }{:\"?><\\[\\]\\;\\\\',./\\-`~=]+");
+    "[A-Za-z0-9!@#$%^&*()_+| }{:\"?><\\[\\]\\;\\\\',./\\-`~=]+");
 
 inline void addWhitespaceIfNeeded(std::string *string) {
   if (string->empty()) {

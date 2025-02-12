@@ -7,7 +7,6 @@ experimental C++ reimplementation of [wyatt](https://github.com/httpget)'s luau 
 - ensure binary uses tailcalls
 - switch from std::unordered_map to a performant replacement
 - use 2 passes to allow for global and local analysis for maximum character saving
-- make strings more efficent
 
 ### Building
 
