@@ -278,7 +278,6 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 
     if (expr->value.size != 0) {
       appendConstantString(&state->output, expr->value);
-      return;
     }
 
     state->output.append("\"");
