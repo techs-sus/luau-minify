@@ -19,6 +19,7 @@ add_executable(Minifier.CLI)
 
 target_sources(Minifier PRIVATE
     src/minifier.cpp
+    src/syntax.cpp
 )
 
 target_sources(Minifier.CLI PRIVATE
@@ -34,6 +35,7 @@ endif ()
 
 target_compile_features(Minifier PUBLIC cxx_std_20)
 target_compile_options(Minifier PRIVATE ${OPTIONS})
+target_include_directories(Minifier PUBLIC RE-flex/include)
 target_link_libraries(Minifier PRIVATE Luau.Ast ReflexLibStatic)
 
 target_compile_features(Minifier.CLI PUBLIC cxx_std_20)

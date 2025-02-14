@@ -84,14 +84,15 @@ inline static bool isWhitespaceCharacter(const char character) {
 static const std::string stringSafeRegex = reflex::Matcher::convert(
     "[A-Za-z0-9!@#$%^&*()_+| }{:\"?><\\[\\]\\;\\\\',./\\-`~=]+");
 
-inline void addWhitespaceIfNeeded(std::string *string) {
-  if (string->empty()) {
+inline void addWhitespaceIfNeeded(std::string &string) {
+  // if the string is empty, then no whitespace is needed
+  if (string.empty()) {
     return;
-  }
+  };
 
-  // if the lastCharacter is not a whitespace character, add a space
-  const char lastCharacter = string->back();
-  if (!isWhitespaceCharacter(lastCharacter)) {
-    string->append(" ");
+  if (!isWhitespaceCharacter(string.back())) {
+    string.append(" ");
   }
 }
+
+const std::string getNameAtIndex(size_t count);

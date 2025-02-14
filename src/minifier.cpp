@@ -1,6 +1,3 @@
-#include "minifier.h"
-#include "syntax.h"
-
 #include <Luau/Ast.h>
 #include <algorithm>
 #include <charconv>
@@ -9,32 +6,10 @@
 #include <reflex/matcher.h>
 #include <system_error>
 
-const std::string getLocalName(size_t totalLocals) {
-  std::string letters;
-  while (totalLocals != 0) {
-    totalLocals--;
-    const char letter = (97 + (totalLocals % 26));
-
-    letters.insert(0, &letter);
-    totalLocals /= 26;
-  }
-
-  if (isLuauKeyword(letters.c_str())) {
-    letters.insert(0, "_");
-  }
-
-  return letters;
-}
-
-// We differentiate in the output by adding two underscores, which is NOT in the
-// character range of getLocalName().
-static const char *globalNamePrefix = "__";
-const std::string getGlobalName(size_t totalGlobals) {
-  std::string localName = getLocalName(totalGlobals);
-  localName.insert(0, globalNamePrefix);
-
-  return localName;
-};
+#include "Luau/Common.h"
+#include "globals.h"
+#include "minifier.h"
+#include "syntax.h"
 
 std::string replaceAll(std::string str, const std::string &from,
                        const std::string &to) {
@@ -49,7 +24,7 @@ std::string replaceAll(std::string str, const std::string &from,
 }
 
 void handleAstLocal(Luau::AstLocal *local, State *state, size_t localDepth) {
-  auto name = getLocalName(state->totalLocals);
+  auto name = getNameAtIndex(state->totalLocals);
 
   state->locals[localDepth][local->name.value] = name;
   state->output.append(name);
@@ -105,19 +80,19 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       handleNode(node, state, localDepth + 1);
     }
 
-    for (const auto &[depth, localMap] : state->locals) {
+    for (const auto &[depth, _] : state->locals) {
       if (depth - 1 > localDepth) {
         state->locals[depth] = {};
       }
     }
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
   } else if (node->is<Luau::AstStatExpr>()) {
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     handleNode(node->as<Luau::AstStatExpr>()->expr, state, localDepth + 1);
   } else if (node->is<Luau::AstExprCall>()) {
     auto call = node->as<Luau::AstExprCall>();
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
 
     handleNode(call->func, state, localDepth + 1);
 
@@ -136,13 +111,12 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append(")");
   } else if (node->is<Luau::AstStatLocal>()) {
     auto statement = node->as<Luau::AstStatLocal>();
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("local ");
-    State assignValuesState =
-        State{.output = "",
-              .locals = state->locals,
-              .totalLocals = state->totalLocals,
-              .global_variables_state = state->global_variables_state};
+    State assignValuesState = State{.output = "",
+                                    .locals = state->locals,
+                                    .totalLocals = state->totalLocals,
+                                    .globals = state->globals};
 
     // don't add more values than there are variables
     if (statement->values.size > statement->vars.size) {
@@ -173,7 +147,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     }
 
     state->output.append(assignValuesState.output);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
   } else if (node->is<Luau::AstExprLocal>()) {
     auto expr = node->as<Luau::AstExprLocal>();
 
@@ -195,14 +169,12 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("unknown");
   } else if (node->is<Luau::AstStatAssign>()) {
     auto assign = node->as<Luau::AstStatAssign>();
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
 
-    State assignedValuesState =
-        State{.output = "",
-              .locals = state->locals,
-              .totalLocals = state->totalLocals,
-
-              .global_variables_state = state->global_variables_state};
+    State assignedValuesState = State{.output = "",
+                                      .locals = state->locals,
+                                      .totalLocals = state->totalLocals,
+                                      .globals = state->globals};
 
     for (size_t index = 0; index < assign->values.size; index++) {
       auto value = assign->values.data[index];
@@ -231,23 +203,13 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     }
 
     state->output.append(assignedValuesState.output);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
   } else if (node->is<Luau::AstExprVarargs>()) {
     state->output.append("...");
   } else if (node->is<Luau::AstExprGlobal>()) {
     auto expr = node->as<Luau::AstExprGlobal>();
-
-    GlobalVariablesState *global_variables_state =
-        state->global_variables_state;
-
-    if (!state->global_variables_state->map.contains(expr->name.value)) {
-      auto globalName = getGlobalName(state->global_variables_state->total);
-      global_variables_state->map[expr->name.value] = globalName;
-      global_variables_state->total++;
-      state->output.append(globalName);
-    } else {
-      state->output.append(global_variables_state->map[expr->name.value]);
-    }
+    // originalName -> translatedName
+    state->output.append(state->globals[expr->name.value]);
   } else if (node->is<Luau::AstExprConstantNumber>()) {
     auto expr = node->as<Luau::AstExprConstantNumber>();
 
@@ -345,7 +307,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("=");
     handleNode(expr->value, state, localDepth + 1);
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
   } else if (node->is<Luau::AstExprUnary>()) {
     auto unary = node->as<Luau::AstExprUnary>();
 
@@ -370,23 +332,23 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("if ");
     handleNode(if_statement->condition, state, localDepth + 1);
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("then ");
     handleNode(if_statement->thenbody, state, localDepth + 1);
 
     if (if_statement->elsebody != nullptr) {
-      addWhitespaceIfNeeded(&state->output);
+      addWhitespaceIfNeeded(state->output);
       handleNode(if_statement->elsebody, state, localDepth + 1);
     }
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("end ");
   } else if (node->is<Luau::AstExprIfElse>()) {
     auto expr = node->as<Luau::AstExprIfElse>();
 
     state->output.append("if ");
     handleNode(expr->condition, state, localDepth + 1);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("then ");
 
     handleNode(expr->trueExpr, state, localDepth + 1);
@@ -401,7 +363,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   } else if (node->is<Luau::AstStatLocalFunction>()) {
     auto local_function = node->as<Luau::AstStatLocalFunction>();
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("local ");
     state->totalLocals++;
     handleAstLocal(local_function->name, state, localDepth + 1);
@@ -411,7 +373,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   } else if (node->is<Luau::AstStatFunction>()) {
     auto function = node->as<Luau::AstStatFunction>();
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     handleNode(function->name, state, localDepth + 1);
     state->output.append("=");
     handleNode(function->func, state, localDepth + 1);
@@ -442,7 +404,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("end");
   } else if (node->is<Luau::AstExprIndexExpr>()) {
     auto expr = node->as<Luau::AstExprIndexExpr>();
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
 
     handleNode(expr->expr, state, localDepth + 1);
     state->output.append("[");
@@ -451,13 +413,13 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   } else if (node->is<Luau::AstStatWhile>()) {
     auto while_statement = node->as<Luau::AstStatWhile>();
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("while ");
     handleNode(while_statement->condition, state, localDepth + 1);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("do ");
     handleNode(while_statement->body, state, localDepth + 1);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("end ");
   } else if (node->is<Luau::AstExprGroup>()) {
     auto expr_group = node->as<Luau::AstExprGroup>();
@@ -467,15 +429,14 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   } else if (node->is<Luau::AstStatFor>()) {
     auto for_statement = node->as<Luau::AstStatFor>();
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("for ");
     state->totalLocals++;
 
     State forLoopState{.output = "",
                        .locals = state->locals,
                        .totalLocals = state->totalLocals,
-
-                       .global_variables_state = state->global_variables_state};
+                       .globals = state->globals};
 
     handleAstLocal(for_statement->var, &forLoopState, localDepth + 1);
     forLoopState.output.append("=");
@@ -490,17 +451,17 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       forLoopState.output.append(" ");
     }
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     forLoopState.output.append("do ");
     handleNode(for_statement->body, &forLoopState, localDepth + 1);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     forLoopState.output.append("end ");
 
     state->output.append(forLoopState.output);
   } else if (node->is<Luau::AstStatForIn>()) {
     auto for_in_statement = node->as<Luau::AstStatForIn>();
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("for ");
 
     for (size_t index = 0; index < for_in_statement->vars.size; index++) {
@@ -514,7 +475,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       }
     }
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("in ");
 
     for (size_t index = 0; index < for_in_statement->values.size; index++) {
@@ -525,32 +486,32 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       }
     }
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("do ");
     handleNode(for_in_statement->body, state, localDepth + 1);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("end ");
   } else if (node->is<Luau::AstStatRepeat>()) {
     auto repeat_statement = node->as<Luau::AstStatRepeat>();
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("repeat ");
 
     for (auto statement : repeat_statement->body->body) {
       handleNode(statement, state, localDepth + 1);
     }
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("until ");
     handleNode(repeat_statement->condition, state, localDepth + 1);
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
   } else if (node->is<Luau::AstStatBreak>()) {
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("break;");
   } else if (node->is<Luau::AstStatReturn>()) {
     auto return_statement = node->as<Luau::AstStatReturn>();
 
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("return ");
 
     for (size_t index = 0; index < return_statement->list.size; index++) {
@@ -564,7 +525,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
 
     state->output.append(";");
   } else if (node->is<Luau::AstStatContinue>()) {
-    addWhitespaceIfNeeded(&state->output);
+    addWhitespaceIfNeeded(state->output);
     state->output.append("continue;");
   } else {
     // unhandled node
@@ -572,42 +533,54 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   }
 }
 
-std::string processAstRoot(Luau::AstStatBlock *root) {
-  GlobalVariablesState global_variables_state = {};
+std::pair<std::string, global_map> initGlobalGlue(AstGlobalTracking &tracking) {
+  std::vector<std::pair<const char *, size_t>> globalUses(
+      tracking.globalUses.begin(), tracking.globalUses.end());
+  global_map globalMap = global_map(nullptr);
 
-  State state = {.global_variables_state = &global_variables_state};
+  if (globalUses.empty()) {
+    return std::pair(std::string(), globalMap);
+  };
 
-  handleNode(root, &state, 0);
+  std::sort(globalUses.begin(), globalUses.end(),
+            [](const auto &a, const auto &b) { return a.second > b.second; });
 
-  // skip emitting global glue if no globals are used
-  if (state.global_variables_state->map.empty()) {
-    return state.output;
-  }
-
-  std::string globalMapOutput = "local ";
+  std::string output = "local ";
   std::string originalNameMapping = "=";
 
-  size_t index = 0;
-  for (const auto &[originalName, translatedName] :
-       state.global_variables_state->map) {
-    originalNameMapping.append(originalName);
-    globalMapOutput.append(translatedName);
+  for (size_t index = 0; index < globalUses.size(); index++) {
+    const char *originalName = globalUses[index].first;
+    const std::string translatedName = getNameAtIndex(index + 1);
 
-    if (index < state.global_variables_state->map.size() - 1) {
-      globalMapOutput.append(",");
+    originalNameMapping.append(originalName);
+    output.append(translatedName);
+    globalMap[originalName] = translatedName;
+
+    if (index < globalUses.size() - 1) {
+      output.append(",");
       originalNameMapping.append(",");
     }
-
-    index++;
   }
 
-  globalMapOutput.append(originalNameMapping);
+  output.append(originalNameMapping);
 
   // add semicolon because identifiers are not whitespace
-  globalMapOutput.append(";");
+  output.append(";");
 
-  // append global map setup to the start of the root output
-  state.output.insert(0, globalMapOutput);
+  return std::pair(output, globalMap);
+}
+
+std::string processAstRoot(Luau::AstStatBlock *root) {
+  AstGlobalTracking globalTracking;
+  root->visit(&globalTracking);
+
+  auto globalInitGlue = initGlobalGlue(globalTracking);
+
+  State state = {.output = globalInitGlue.first,
+                 .totalLocals = globalTracking.globalIndex,
+                 .globals = globalInitGlue.second};
+
+  handleNode(root, &state, 0);
 
   return state.output;
 }
