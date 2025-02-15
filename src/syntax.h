@@ -54,3 +54,4 @@ const std::string replaceAll(std::string str, const std::string &from,
 
 // callee's are expected to escape quotes themselves
 void appendRawString(std::string &output, absl::string_view string);
+size_t calculateEffectiveLength(absl::string_view string);

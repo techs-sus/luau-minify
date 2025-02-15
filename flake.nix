@@ -21,10 +21,10 @@
         };
       in
       {
-        devShells.default = pkgs.mkShell.override { stdenv = pkgs.clang19Stdenv; } {
+        devShells.default = pkgs.mkShell.override { stdenv = pkgs.clangStdenv; } {
           buildInputs = with pkgs; [
             cmake
-            clang
+            ninja
           ];
 
           nativeBuildInputs = with pkgs; [
@@ -33,7 +33,6 @@
 
           packages = with pkgs; [
             hyperfine
-            ninja
           ];
 
           shellHook = "";

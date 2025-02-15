@@ -1,4 +1,7 @@
 #include "tracking.h"
+#include "Luau/Ast.h"
+#include "Luau/Common.h"
+#include "absl/strings/string_view.h"
 #include "syntax.h"
 #include <algorithm>
 #include <string>
@@ -40,31 +43,38 @@ Glue initGlue(AstTracking &tracking) {
     }
   }
 
-  if (!stringUses.empty()) {
-    output.append(",");
-    originalNameMapping.append(",");
-  }
-
   size_t nameIndex = globalUses.size();
+  std::vector<std::pair<std::string_view, std::string>> profitableStrings;
 
   for (size_t index = 0; index < stringUses.size(); index++) {
     const auto &[string, uses] = stringUses[index];
     const std::string localName = getNameAtIndex(++nameIndex);
 
-    const int32_t variableUseCost = localName.size();
-    const int32_t variableInitCost = variableUseCost + 1; // comma = 1
-    const int32_t stringCost = (string.size() + 2);       // quotes = 2
+    const size_t variableUseCost = localName.size();
+    const size_t variableInitCost = variableUseCost + 1; // comma = 1
+    const size_t effectiveStringCost =
+        (calculateEffectiveLength(replaceAll(string.data(), "\"", "\\\"")) +
+         2); // quotes = 2
 
-    const int32_t regularCost = (stringCost * uses);
+    const size_t regularCost = effectiveStringCost * uses;
 
-    const int32_t withVariablesCost =
-        variableInitCost + (uses * variableUseCost);
+    const size_t withVariablesCost =
+        variableInitCost + effectiveStringCost + (uses * variableUseCost);
 
-    // if the cost with variables is more expensive than the regular cost,
-    // continue to the next iteration
-    if (withVariablesCost > regularCost) {
-      continue;
+    if (regularCost > withVariablesCost) {
+      profitableStrings.emplace_back(string, localName);
+    } else {
+      nameIndex--;
     }
+  }
+
+  if (!profitableStrings.empty() && !globalUses.empty()) {
+    output.append(",");
+    originalNameMapping.append(",");
+  }
+
+  for (size_t index = 0; index < profitableStrings.size(); index++) {
+    const auto &[string, localName] = profitableStrings[index];
 
     output.append(localName);
 
@@ -75,7 +85,7 @@ Glue initGlue(AstTracking &tracking) {
 
     glue.strings[string] = localName;
 
-    if (index < stringUses.size() - 1) {
+    if (index < profitableStrings.size() - 1) {
       output.append(",");
       originalNameMapping.append(",");
     }

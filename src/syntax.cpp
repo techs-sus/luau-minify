@@ -19,19 +19,28 @@ const std::string getNameAtIndex(size_t count) {
   return letters;
 }
 
+static reflex::Matcher stringSafeMatcher(stringSafeRegex, "");
+
 void appendRawString(std::string &output, absl::string_view string) {
-  reflex::Matcher matcher(stringSafeRegex, string.data());
+  static char unsafeByteBuffer[5]; // \x takes 2 bytes; %02x takes 2 bytes; and
+                                   // null byte overhead
+
   std::vector<std::pair<std::pair<std::string, size_t>, bool>> blobs;
 
-  while (matcher.find() != 0) {
-    blobs.emplace_back(std::pair(matcher.text(), matcher.first()), true);
+  // reset the matcher, but preserve the pattern and set input data
+  stringSafeMatcher.input(string.data());
+
+  while (stringSafeMatcher.find() != 0) {
+    blobs.emplace_back(
+        std::pair(stringSafeMatcher.text(), stringSafeMatcher.first()), true);
   }
 
-  // reset the matcher, but also preserve the pattern and input data
-  matcher.input(string.data());
+  // reset the matcher, but preserve the pattern and set input data
+  stringSafeMatcher.input(string.data());
 
-  while (matcher.split() != 0) {
-    blobs.emplace_back(std::pair(matcher.text(), matcher.first()), false);
+  while (stringSafeMatcher.split() != 0) {
+    blobs.emplace_back(
+        std::pair(stringSafeMatcher.text(), stringSafeMatcher.first()), false);
   }
 
   std::sort(blobs.begin(), blobs.end(), [](const auto &a, const auto &b) {
@@ -47,13 +56,32 @@ void appendRawString(std::string &output, absl::string_view string) {
       for (unsigned char character : pair.first) {
         // buffer overflow isn't possible thanks to snprintf(),
         // but character should still be unsigned
-        char buf[5]; // \x takes 2 bytes; %02x takes 2 bytes; and null byte
-                     // overhead
-        snprintf(buf, sizeof(buf), "\\x%02x", character);
-        output.append(buf);
+        snprintf(unsafeByteBuffer, sizeof(unsafeByteBuffer), "\\x%02x",
+                 character);
+        output.append(unsafeByteBuffer);
       }
     }
   }
+}
+
+size_t calculateEffectiveLength(absl::string_view string) {
+  size_t length = 0;
+
+  // reset the matcher, but preserve the pattern and set input data
+  stringSafeMatcher.input(string.data());
+
+  while (stringSafeMatcher.find() != 0) {
+    length += stringSafeMatcher.size();
+  }
+
+  // reset the matcher, but also preserve the pattern and input data
+  stringSafeMatcher.input(string.data());
+
+  while (stringSafeMatcher.split() != 0) {
+    length += 4 * stringSafeMatcher.size();
+  }
+
+  return length;
 }
 
 const std::string replaceAll(std::string str, const std::string &from,
