@@ -14,8 +14,7 @@ clangStdenv.mkDerivation {
   buildInputs = [ ];
 
   buildPhase = ''
-    cmake -S .. -B build -DCMAKE_BUILD_TYPE=Release
-    cmake --build ./ --target Minifier.CLI --config Release
+    cmake --build . --target Minifier.CLI --config Release
   '';
 
   installPhase = ''

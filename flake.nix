@@ -31,8 +31,9 @@
             clang-tools
           ];
 
-          packages = [
-            pkgs.hyperfine
+          packages = with pkgs; [
+            hyperfine
+            ninja
           ];
 
           shellHook = "";

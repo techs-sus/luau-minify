@@ -199,8 +199,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     if (expr->value.size != 0) {
       appendRawString(state->output, replaceAll(std::string(expr->value.begin(),
                                                             expr->value.end()),
-                                                "\"", "\\\"")
-                                         .c_str());
+                                                "\"", "\\\""));
     }
 
     state->output.append("\"");
@@ -223,8 +222,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       if (string.size != 0) {
         appendRawString(
             state->output,
-            replaceAll(std::string(string.begin(), string.end()), "`", "\\`")
-                .c_str());
+            replaceAll(std::string(string.begin(), string.end()), "`", "\\`"));
       };
 
       // the last string never has a corresponding expression

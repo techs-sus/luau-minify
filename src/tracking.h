@@ -1,22 +1,22 @@
 #pragma once
 
+#include "absl/container/flat_hash_map.h"
 #include <Luau/Ast.h>
 #include <Luau/DenseHash.h>
 #include <cstddef>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 
-typedef Luau::DenseHashMap<const char *, std::string> global_map;
-typedef Luau::DenseHashMap<const char *, size_t> global_uses;
+typedef absl::flat_hash_map<const char *, std::string> global_map;
+typedef absl::flat_hash_map<const char *, size_t> global_uses;
 
 // unsure of what the empty_key should be
-typedef std::unordered_map<std::string_view, size_t> string_uses;
-typedef std::unordered_map<std::string_view, std::string> string_map;
+typedef absl::flat_hash_map<std::string_view, size_t> string_uses;
+typedef absl::flat_hash_map<std::string_view, std::string> string_map;
 
 class AstTracking : public Luau::AstVisitor {
 public:
-  global_uses globalUses = global_uses(nullptr);
+  global_uses globalUses = global_uses();
   string_uses stringUses = string_uses();
 
   bool visit(Luau::AstExprGlobal *node) override {
@@ -34,7 +34,7 @@ public:
 };
 
 struct Glue {
-  global_map globals = global_map(nullptr);
+  global_map globals = global_map();
   string_map strings = string_map();
 
   std::string init = "";

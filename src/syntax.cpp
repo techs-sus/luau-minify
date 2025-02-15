@@ -19,8 +19,8 @@ const std::string getNameAtIndex(size_t count) {
   return letters;
 }
 
-void appendRawString(std::string &output, const char *string) {
-  reflex::Matcher matcher(stringSafeRegex, string);
+void appendRawString(std::string &output, absl::string_view string) {
+  reflex::Matcher matcher(stringSafeRegex, string.data());
   std::vector<std::pair<std::pair<std::string, size_t>, bool>> blobs;
 
   while (matcher.find() != 0) {
@@ -28,7 +28,7 @@ void appendRawString(std::string &output, const char *string) {
   }
 
   // reset the matcher, but also preserve the pattern and input data
-  matcher.input(string);
+  matcher.input(string.data());
 
   while (matcher.split() != 0) {
     blobs.emplace_back(std::pair(matcher.text(), matcher.first()), false);

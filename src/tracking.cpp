@@ -70,7 +70,7 @@ Glue initGlue(AstTracking &tracking) {
 
     originalNameMapping.append("\"");
     appendRawString(originalNameMapping,
-                    replaceAll(string.data(), "\"", "\\\"").c_str());
+                    replaceAll(string.data(), "\"", "\\\""));
     originalNameMapping.append("\"");
 
     glue.strings[string] = localName;

@@ -1,72 +1,23 @@
 #pragma once
 
+#include "absl/container/flat_hash_set.h"
 #include <Luau/Ast.h>
 #include <Luau/DenseHash.h>
+#include <absl/strings/string_view.h>
 #include <reflex/matcher.h>
 #include <string>
 
-static const Luau::DenseHashSet<const char *> createLuauKeywords() {
-  auto set = Luau::DenseHashSet<const char *>("");
-
-  set.insert("do");
-  set.insert("end");
-  set.insert("while");
-  set.insert("repeat");
-  set.insert("until");
-  set.insert("if");
-  set.insert("then");
-  set.insert("else");
-  set.insert("elseif");
-  set.insert("for");
-  set.insert("in");
-  set.insert("function");
-  set.insert("local");
-  set.insert("return");
-  set.insert("break");
-  set.insert("continue");
-  set.insert("true");
-  set.insert("false");
-  set.insert("nil");
-  set.insert("and");
-  set.insert("or");
-  set.insert("not");
-
-  return set;
+static const absl::flat_hash_set<const char *> luauKeywords = {
+    "do",    "end",    "while",  "repeat",   "until", "if",
+    "then",  "else",   "elseif", "for",      "in",    "function",
+    "local", "return", "break",  "continue", "true",  "false",
+    "nil",   "and",    "or",     "not",
 };
 
-static const Luau::DenseHashSet<char> createWhitespaceCharacters() {
-  auto set = Luau::DenseHashSet<char>((char)255);
-
-  set.insert(' ');
-  set.insert(';');
-  set.insert('}');
-  set.insert('{');
-  set.insert(')');
-  set.insert('(');
-  set.insert(',');
-  set.insert(']');
-  set.insert('[');
-  set.insert('.');
-  set.insert('=');
-  set.insert('+');
-  set.insert('-');
-  set.insert('*');
-  set.insert('/');
-  set.insert('%');
-  set.insert('^');
-  set.insert('#');
-  set.insert('"');
-  set.insert('`');
-  set.insert('\'');
-
-  return set;
+static const absl::flat_hash_set<char> whitespaceCharacters = {
+    ' ', ';', '}', '{', ')', '(', ',', ']', '[', '.',  '=',
+    '+', '-', '*', '/', '%', '^', '#', '"', '`', '\'',
 };
-
-static const Luau::DenseHashSet<const char *> luauKeywords =
-    createLuauKeywords();
-
-static const Luau::DenseHashSet<char> whitespaceCharacters =
-    createWhitespaceCharacters();
 
 static const char *compoundSymbols[Luau::AstExprBinary::Op__Count] = {
     "+",  "-",  "*", "/",  "//", "%",  "^",     "..",
@@ -97,8 +48,9 @@ inline void addWhitespaceIfNeeded(std::string &string) {
 
 const std::string getNameAtIndex(size_t count);
 
+// in "str", all references of "from" are replaced with "to"
 const std::string replaceAll(std::string str, const std::string &from,
                              const std::string &to);
 
 // callee's are expected to escape quotes themselves
-void appendRawString(std::string &output, const char *string);
+void appendRawString(std::string &output, absl::string_view string);

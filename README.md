@@ -5,7 +5,6 @@ experimental C++ reimplementation of [wyatt](https://github.com/httpget)'s luau 
 ## TODO
 
 - ensure binary uses tailcalls
-- switch from std::unordered_map to a performant replacement
 - use 2 passes to allow for global and local analysis for maximum character saving
 - our main focus is safety, stability, and quality. performance is probably not good.
 
@@ -14,7 +13,7 @@ experimental C++ reimplementation of [wyatt](https://github.com/httpget)'s luau 
 Regular linux distros:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target Minifier.CLI --config Release
 ```
 
