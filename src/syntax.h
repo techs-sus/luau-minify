@@ -96,3 +96,9 @@ inline void addWhitespaceIfNeeded(std::string &string) {
 }
 
 const std::string getNameAtIndex(size_t count);
+
+const std::string replaceAll(std::string str, const std::string &from,
+                             const std::string &to);
+
+// callee's are expected to escape quotes themselves
+void appendRawString(std::string &output, const char *string);

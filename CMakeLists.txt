@@ -20,6 +20,7 @@ add_executable(Minifier.CLI)
 target_sources(Minifier PRIVATE
     src/minifier.cpp
     src/syntax.cpp
+    src/tracking.cpp
 )
 
 target_sources(Minifier.CLI PRIVATE

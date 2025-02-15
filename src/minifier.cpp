@@ -1,70 +1,19 @@
 #include <Luau/Ast.h>
-#include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <limits>
 #include <reflex/matcher.h>
+#include <string_view>
 #include <system_error>
 
-#include "Luau/Common.h"
-#include "globals.h"
 #include "minifier.h"
 #include "syntax.h"
-
-std::string replaceAll(std::string str, const std::string &from,
-                       const std::string &to) {
-  if (from.empty())
-    return str;
-  size_t start_pos = 0;
-  while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
-    str.replace(start_pos, from.length(), to);
-    start_pos += to.length();
-  }
-  return str;
-}
 
 void handleAstLocal(Luau::AstLocal *local, State *state, size_t localDepth) {
   auto name = getNameAtIndex(state->totalLocals);
 
   state->locals[localDepth][local->name.value] = name;
   state->output.append(name);
-}
-
-void appendConstantString(std::string *output, Luau::AstArray<char> string) {
-  reflex::Matcher matcher(stringSafeRegex, string.data);
-  std::vector<std::pair<std::pair<std::string, size_t>, bool>> blobs;
-
-  while (matcher.find() != 0) {
-    blobs.emplace_back(std::pair(matcher.text(), matcher.first()), true);
-  }
-
-  // reset the matcher, but also preserve the pattern and input data
-  matcher.input(string.data);
-
-  while (matcher.split() != 0) {
-    blobs.emplace_back(std::pair(matcher.text(), matcher.first()), false);
-  }
-
-  std::sort(blobs.begin(), blobs.end(), [](const auto &a, const auto &b) {
-    return a.first.second < b.first.second;
-  });
-
-  for (const auto &[pair, isStringSafe] : blobs) {
-    if (isStringSafe) {
-      // write all safe string data
-      output->append(replaceAll(pair.first, "\"", "\\\""));
-    } else {
-      // if any unsafe bytes are left over, manually encode them
-      for (unsigned char character : pair.first) {
-        // buffer overflow isn't possible thanks to snprintf(),
-        // but character should still be unsigned
-        char buf[5]; // \x takes 2 bytes; %02x takes 2 bytes; and null byte
-                     // overhead
-        snprintf(buf, sizeof(buf), "\\x%02x", character);
-        output->append(buf);
-      }
-    }
-  }
 }
 
 void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
@@ -116,7 +65,8 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     State assignValuesState = State{.output = "",
                                     .locals = state->locals,
                                     .totalLocals = state->totalLocals,
-                                    .globals = state->globals};
+                                    .globals = state->globals,
+                                    .strings = state->strings};
 
     // don't add more values than there are variables
     if (statement->values.size > statement->vars.size) {
@@ -174,7 +124,8 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     State assignedValuesState = State{.output = "",
                                       .locals = state->locals,
                                       .totalLocals = state->totalLocals,
-                                      .globals = state->globals};
+                                      .globals = state->globals,
+                                      .strings = state->strings};
 
     for (size_t index = 0; index < assign->values.size; index++) {
       auto value = assign->values.data[index];
@@ -236,10 +187,20 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     };
   } else if (node->is<Luau::AstExprConstantString>()) {
     auto expr = node->as<Luau::AstExprConstantString>();
+    std::string_view view(expr->value.begin(), expr->value.end());
+
+    if (state->strings.contains(view)) {
+      state->output.append(state->strings[view]);
+      return;
+    }
+
     state->output.append("\"");
 
     if (expr->value.size != 0) {
-      appendConstantString(&state->output, expr->value);
+      appendRawString(state->output, replaceAll(std::string(expr->value.begin(),
+                                                            expr->value.end()),
+                                                "\"", "\\\"")
+                                         .c_str());
     }
 
     state->output.append("\"");
@@ -260,7 +221,10 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     for (size_t index = 0; index < expr->strings.size; index++) {
       auto string = expr->strings.data[index];
       if (string.size != 0) {
-        appendConstantString(&state->output, string);
+        appendRawString(
+            state->output,
+            replaceAll(std::string(string.begin(), string.end()), "`", "\\`")
+                .c_str());
       };
 
       // the last string never has a corresponding expression
@@ -436,7 +400,8 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     State forLoopState{.output = "",
                        .locals = state->locals,
                        .totalLocals = state->totalLocals,
-                       .globals = state->globals};
+                       .globals = state->globals,
+                       .strings = state->strings};
 
     handleAstLocal(for_statement->var, &forLoopState, localDepth + 1);
     forLoopState.output.append("=");
@@ -533,52 +498,16 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
   }
 }
 
-std::pair<std::string, global_map> initGlobalGlue(AstGlobalTracking &tracking) {
-  std::vector<std::pair<const char *, size_t>> globalUses(
-      tracking.globalUses.begin(), tracking.globalUses.end());
-  global_map globalMap = global_map(nullptr);
-
-  if (globalUses.empty()) {
-    return std::pair(std::string(), globalMap);
-  };
-
-  std::sort(globalUses.begin(), globalUses.end(),
-            [](const auto &a, const auto &b) { return a.second > b.second; });
-
-  std::string output = "local ";
-  std::string originalNameMapping = "=";
-
-  for (size_t index = 0; index < globalUses.size(); index++) {
-    const char *originalName = globalUses[index].first;
-    const std::string translatedName = getNameAtIndex(index + 1);
-
-    originalNameMapping.append(originalName);
-    output.append(translatedName);
-    globalMap[originalName] = translatedName;
-
-    if (index < globalUses.size() - 1) {
-      output.append(",");
-      originalNameMapping.append(",");
-    }
-  }
-
-  output.append(originalNameMapping);
-
-  // add semicolon because identifiers are not whitespace
-  output.append(";");
-
-  return std::pair(output, globalMap);
-}
-
 std::string processAstRoot(Luau::AstStatBlock *root) {
-  AstGlobalTracking globalTracking;
-  root->visit(&globalTracking);
+  AstTracking tracking;
+  root->visit(&tracking);
 
-  auto globalInitGlue = initGlobalGlue(globalTracking);
+  Glue glue = initGlue(tracking);
 
-  State state = {.output = globalInitGlue.first,
-                 .totalLocals = globalTracking.globalIndex,
-                 .globals = globalInitGlue.second};
+  State state = {.output = glue.init,
+                 .totalLocals = glue.nameIndex,
+                 .globals = glue.globals,
+                 .strings = glue.strings};
 
   handleNode(root, &state, 0);
 
