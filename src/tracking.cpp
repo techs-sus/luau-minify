@@ -1,6 +1,4 @@
 #include "tracking.h"
-#include "Luau/Ast.h"
-#include "Luau/Common.h"
 #include "absl/strings/string_view.h"
 #include "syntax.h"
 #include <algorithm>
