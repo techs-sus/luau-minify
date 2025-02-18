@@ -1,7 +1,8 @@
 {
   lib,
   clangStdenv,
-  pkgs,
+  cmake,
+  ninja,
   ...
 }:
 clangStdenv.mkDerivation {
@@ -10,16 +11,21 @@ clangStdenv.mkDerivation {
 
   src = ./.;
 
-  nativeBuildInputs = with pkgs; [ cmake ];
+  nativeBuildInputs = [
+    cmake
+    ninja
+  ];
   buildInputs = [ ];
 
-  buildPhase = ''
-    cmake --build . --target Minifier.CLI --config Release
-  '';
+  ninjaFlags = [ "Minifier.CLI" ];
 
   installPhase = ''
+    runHook preInstall
+
     mkdir -p $out/bin
     cp luau-minify $out/bin/
+
+    runHook postInstall
   '';
 
   meta = {

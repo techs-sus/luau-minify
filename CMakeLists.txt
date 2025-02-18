@@ -12,9 +12,11 @@ endif ()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # clangd
 
 project(Minifier LANGUAGES CXX)
+
 add_subdirectory(luau)
 add_subdirectory(RE-flex)
-add_subdirectory(abseil-cpp)
+add_subdirectory(unordered_dense)
+
 add_library(Minifier STATIC)
 add_executable(Minifier.CLI)
 
@@ -41,11 +43,10 @@ endif ()
 
 target_compile_features(Minifier PUBLIC cxx_std_20)
 target_compile_options(Minifier PRIVATE ${OPTIONS})
-target_include_directories(Minifier PUBLIC RE-flex/include)
-target_link_libraries(Minifier PRIVATE Luau.Ast ReflexLibStatic)
-target_link_libraries(Minifier PUBLIC absl::string_view absl::flat_hash_map)
+target_link_libraries(Minifier PRIVATE ReflexLibStatic)
+target_link_libraries(Minifier PUBLIC Luau.Ast unordered_dense)
 
 target_compile_features(Minifier.CLI PUBLIC cxx_std_20)
 target_compile_options(Minifier.CLI PRIVATE ${OPTIONS})
-target_link_libraries(Minifier.CLI PRIVATE Minifier Luau.Ast)
+target_link_libraries(Minifier.CLI PRIVATE Minifier)
 set_target_properties(Minifier.CLI PROPERTIES OUTPUT_NAME luau-minify)

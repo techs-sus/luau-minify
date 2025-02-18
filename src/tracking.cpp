@@ -1,9 +1,9 @@
-#include "tracking.h"
-#include "absl/strings/string_view.h"
-#include "syntax.h"
 #include <algorithm>
 #include <string>
 #include <string_view>
+
+#include "syntax.h"
+#include "tracking.h"
 
 Glue initGlue(AstTracking &tracking) {
   Glue glue = {};

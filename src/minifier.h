@@ -1,13 +1,13 @@
 #pragma once
 
-#include "absl/container/flat_hash_map.h"
-#include "tracking.h"
 #include <Luau/Ast.h>
-#include <Luau/DenseHash.h>
+#include <ankerl/unordered_dense.h>
 #include <cstddef>
 
-typedef absl::flat_hash_map<size_t,
-                            absl::flat_hash_map<const char *, std::string>>
+#include "tracking.h"
+
+typedef ankerl::unordered_dense::map<
+    size_t, ankerl::unordered_dense::map<const char *, std::string>>
     deep_local_map;
 
 struct State {

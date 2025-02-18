@@ -6,22 +6,18 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      flake-utils,
-      ...
-    }@inputs:
+  outputs = {
+    nixpkgs,
+    flake-utils,
+    ...
+  } @ inputs:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
+      system: let
         pkgs = import nixpkgs {
           inherit system;
         };
-      in
-      {
-        devShells.default = pkgs.mkShell.override { stdenv = pkgs.clangStdenv; } {
+      in {
+        devShells.default = pkgs.mkShell.override {stdenv = pkgs.clangStdenv;} {
           buildInputs = with pkgs; [
             cmake
             ninja

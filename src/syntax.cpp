@@ -1,15 +1,22 @@
-#include "syntax.h"
 #include <algorithm>
 #include <string>
+
+#include "syntax.h"
+
+static constexpr uint8_t USUABLE_CHARACTERS_LENGTH = 52;
+static constexpr char usableCharacters[USUABLE_CHARACTERS_LENGTH] = {
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'};
 
 const std::string getNameAtIndex(size_t count) {
   std::string letters;
   while (count != 0) {
     count--;
-    const char letter = (97 + (count % 26));
 
-    letters.insert(0, &letter);
-    count /= 26;
+    letters.insert(0, 1, usableCharacters[count % USUABLE_CHARACTERS_LENGTH]);
+    count /= USUABLE_CHARACTERS_LENGTH;
   }
 
   if (isLuauKeyword(letters.c_str())) {
@@ -21,7 +28,7 @@ const std::string getNameAtIndex(size_t count) {
 
 static reflex::Matcher stringSafeMatcher(stringSafeRegex, "");
 
-void appendRawString(std::string &output, absl::string_view string) {
+void appendRawString(std::string &output, std::string_view string) {
   static char unsafeByteBuffer[5]; // \x takes 2 bytes; %02x takes 2 bytes; and
                                    // null byte overhead
 
@@ -64,7 +71,7 @@ void appendRawString(std::string &output, absl::string_view string) {
   }
 }
 
-size_t calculateEffectiveLength(absl::string_view string) {
+size_t calculateEffectiveLength(std::string_view string) {
   size_t length = 0;
 
   // reset the matcher, but preserve the pattern and set input data

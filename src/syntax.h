@@ -1,20 +1,19 @@
 #pragma once
 
-#include "absl/container/flat_hash_set.h"
 #include <Luau/Ast.h>
 #include <Luau/DenseHash.h>
-#include <absl/strings/string_view.h>
+#include <ankerl/unordered_dense.h>
 #include <reflex/matcher.h>
 #include <string>
 
-static const absl::flat_hash_set<const char *> luauKeywords = {
+static const ankerl::unordered_dense::set<const char *> luauKeywords = {
     "do",    "end",    "while",  "repeat",   "until", "if",
     "then",  "else",   "elseif", "for",      "in",    "function",
     "local", "return", "break",  "continue", "true",  "false",
     "nil",   "and",    "or",     "not",
 };
 
-static const absl::flat_hash_set<char> whitespaceCharacters = {
+static const ankerl::unordered_dense::set<char> whitespaceCharacters = {
     ' ', ';', '}', '{', ')', '(', ',', ']', '[', '.',  '=',
     '+', '-', '*', '/', '%', '^', '#', '"', '`', '\'',
 };
@@ -53,5 +52,5 @@ const std::string replaceAll(std::string str, const std::string &from,
                              const std::string &to);
 
 // callee's are expected to escape quotes themselves
-void appendRawString(std::string &output, absl::string_view string);
-size_t calculateEffectiveLength(absl::string_view string);
+void appendRawString(std::string &output, std::string_view string);
+size_t calculateEffectiveLength(std::string_view string);
