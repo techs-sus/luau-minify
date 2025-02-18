@@ -10,7 +10,6 @@
 typedef ankerl::unordered_dense::map<const char *, std::string> global_map;
 typedef ankerl::unordered_dense::map<const char *, size_t> global_uses;
 
-// unsure of what the empty_key should be
 typedef ankerl::unordered_dense::map<std::string_view, size_t> string_uses;
 typedef ankerl::unordered_dense::map<std::string_view, std::string> string_map;
 

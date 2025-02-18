@@ -159,6 +159,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     state->output.append("...");
   } else if (node->is<Luau::AstExprGlobal>()) {
     auto expr = node->as<Luau::AstExprGlobal>();
+
     // originalName -> translatedName
     state->output.append(state->globals[expr->name.value]);
   } else if (node->is<Luau::AstExprConstantNumber>()) {
@@ -228,6 +229,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
       // the last string never has a corresponding expression
       if (index != expr->strings.size - 1) {
         auto expression = expr->expressions.data[index];
+
         state->output.append("{");
         handleNode(expression, state, localDepth + 1);
         state->output.append("}");
@@ -259,7 +261,7 @@ void handleNode(Luau::AstNode *node, State *state, size_t localDepth) {
     auto expr = node->as<Luau::AstExprIndexName>();
 
     handleNode(expr->expr, state, localDepth + 1);
-    state->output.append(&expr->op);
+    state->output.append(1, expr->op);
     state->output.append(expr->index.value);
   } else if (node->is<Luau::AstStatCompoundAssign>()) {
     auto expr = node->as<Luau::AstStatCompoundAssign>();
