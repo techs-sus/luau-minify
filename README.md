@@ -5,7 +5,6 @@ experimental C++ reimplementation of [wyatt](https://github.com/httpget)'s luau 
 ## TODO
 
 - ensure binary uses tailcalls
-- use 2 passes to allow for global and local analysis for maximum character saving
 - our main focus is safety, stability, and quality. performance is probably not good.
 
 ### Building
