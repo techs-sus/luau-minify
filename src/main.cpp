@@ -1,6 +1,8 @@
 #include <cmath>
-#include <cstddef>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <ios>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -35,32 +37,26 @@ std::string formatLocation(const Luau::Location &location) {
 }
 
 std::optional<std::string> readFile(const std::string &name) {
-  FILE *file = fopen(name.c_str(), "rb");
+  std::ifstream file{name, std::ios_base::binary};
 
-  if (!file)
-    return std::nullopt;
-
-  fseek(file, 0, SEEK_END);
-  long length = ftell(file);
-  if (length < 0) {
-    fclose(file);
+  if (!file.is_open()) {
     return std::nullopt;
   }
-  fseek(file, 0, SEEK_SET);
 
-  std::string result(length, 0);
+  std::string contents;
+  std::string line;
 
-  size_t read = fread(result.data(), 1, length, file);
-  fclose(file);
+  while (std::getline(file, line)) {
+    // if line is a shebang, skip
+    if (!(line.length() > 2 && line.at(0) == '#' && line.at(1) == '!')) {
+      contents.append(line);
+      contents.append("\n");
+    }
+  }
 
-  if (read != size_t(length))
-    return std::nullopt;
+  file.close();
 
-  // Skip first line if it's a shebang
-  if (length > 2 && result[0] == '#' && result[1] == '!')
-    result.erase(0, result.find('\n'));
-
-  return result;
+  return contents;
 }
 
 int main(int argc, char **argv) {
@@ -80,15 +76,26 @@ int main(int argc, char **argv) {
   }
 
   const char *name = argv[1];
+  std::string source;
 
-  std::optional<std::string> fileContents = readFile(name);
+  if (strcmp(name, "-") == 0) {
+    // read from stdin
+    std::string line;
+    while (std::getline(std::cin, line)) {
+      source.append(line);
+      source.append("\n");
+    }
+  } else {
+    // read from file
+    std::optional<std::string> fileContents = readFile(name);
 
-  if (fileContents == std::nullopt) {
-    fprintf(stderr, "failed reading file %s\n", name);
-    return 1;
+    if (fileContents == std::nullopt) {
+      std::cerr << "failed reading file: " << name << std::endl;
+      return 1;
+    }
+
+    source = fileContents.value();
   }
-
-  std::string source = fileContents.value();
 
   Luau::Allocator allocator;
   Luau::AstNameTable names(allocator);
