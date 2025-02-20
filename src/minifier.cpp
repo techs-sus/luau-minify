@@ -1,7 +1,9 @@
 #include <Luau/Ast.h>
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
 #include <cstdio>
+#include <functional>
 #include <limits>
 #include <reflex/matcher.h>
 #include <string_view>
@@ -10,51 +12,63 @@
 #include "minifier.h"
 #include "syntax.h"
 
-void handleAstLocal(const Luau::AstLocal *local, State &state,
-                    size_t localDepth) {
+// Creates and appends a variable name for an AstLocal, based on state's current
+// totalLocals, which should get incremented before this function call.
+void handleAstLocalAssignment(const Luau::AstLocal *local, State &state) {
   const std::string name = getNameAtIndex(state.totalLocals);
 
-  state.locals[localDepth][local->name.value] = name;
+  state.blockInfo->locals[local->name.value] = name;
   state.output.append(name);
 }
 
-void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
-  // our hash map implementation initializes values lazily, kept incase we
-  // switch to a different hash_map impl
-  // if (!state.locals.contains(localDepth)) {
-  //   state.locals[localDepth] = {};
-  // };
+// Calls the closure in the scope of block. block is added to the state's
+// blockInfo children, and block's parent is set to the state's blockInfo
+// pointer.
+void callAsChildBlock(State &state, BlockInfo *block,
+                      std::function<void()> closure) {
+  BlockInfo *currentInfo = state.blockInfo;
 
+  currentInfo->children.emplace_back(block);
+  block->parent = currentInfo;
+
+  state.blockInfo = block;
+  closure();
+  state.blockInfo = currentInfo;
+};
+
+void handleNode(const Luau::AstNode *node, State &state) {
   if (node->is<Luau::AstStatBlock>()) {
     // top level block, do blocks, functions
     const auto block = node->as<Luau::AstStatBlock>();
 
     for (const auto &node : block->body) {
-      handleNode(node, state, localDepth + 1);
+      handleNode(node, state);
     }
 
-    for (const auto &[depth, _] : state.locals) {
-      if (depth - 1 > localDepth) {
-        state.locals[depth] = {};
-      }
-    }
+    // TODO: Is this code relevant?
+    /*  for (const auto &[depth, _] : state.locals) {
+          if (depth - 1 > blockDepth) {
+            state.locals[depth] = {};
+          }
+        }
+    */
 
     addWhitespaceIfNeeded(state.output);
   } else if (node->is<Luau::AstStatExpr>()) {
     addWhitespaceIfNeeded(state.output);
-    handleNode(node->as<Luau::AstStatExpr>()->expr, state, localDepth + 1);
+    handleNode(node->as<Luau::AstStatExpr>()->expr, state);
   } else if (node->is<Luau::AstExprCall>()) {
     const auto call = node->as<Luau::AstExprCall>();
     addWhitespaceIfNeeded(state.output);
 
-    handleNode(call->func, state, localDepth + 1);
+    handleNode(call->func, state);
 
     state.output.append("(");
 
     for (size_t index = 0; index < call->args.size; index++) {
       const auto argument = call->args.data[index];
 
-      handleNode(argument, state, localDepth + 1);
+      handleNode(argument, state);
 
       if (index < call->args.size - 1) {
         state.output.append(",");
@@ -66,50 +80,26 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     const auto statement = node->as<Luau::AstStatLocal>();
     addWhitespaceIfNeeded(state.output);
     State assignValuesState = State{.output = "",
-                                    .locals = state.locals,
                                     .totalLocals = state.totalLocals,
                                     .globals = state.globals,
-                                    .strings = state.strings};
+                                    .strings = state.strings,
+                                    .blockInfo = state.blockInfo};
 
     // don't emit more values than there are variables
     size_t totalAssignments =
         std::min(statement->values.size, statement->vars.size);
 
-    std::vector<size_t> unoptimizableAssignmentIndexes;
+    state.output.append("local ");
 
     for (size_t index = 0; index < totalAssignments; index++) {
       const auto value = statement->values.data[index];
-
-      // reassigning locals to globals can be optimized out
-      if (value->is<Luau::AstExprGlobal>()) {
-        const auto local = statement->vars.data[index];
-        const auto global = value->as<Luau::AstExprGlobal>();
-
-        state.locals[localDepth][local->name.value] =
-            state.globals[global->name.value];
-      } else {
-        unoptimizableAssignmentIndexes.emplace_back(index);
-      }
-    }
-
-    if (unoptimizableAssignmentIndexes.empty()) {
-      return;
-    }
-
-    state.output.append("local ");
-
-    for (size_t index = 0; index < unoptimizableAssignmentIndexes.size();
-         index++) {
-      const size_t dataIndex = unoptimizableAssignmentIndexes[index];
-
-      const auto value = statement->values.data[dataIndex];
-      const auto local = statement->vars.data[dataIndex];
+      const auto local = statement->vars.data[index];
 
       state.totalLocals++;
-      handleAstLocal(local, state, localDepth + 1);
-      handleNode(value, assignValuesState, localDepth + 1);
+      handleAstLocalAssignment(local, state);
+      handleNode(value, assignValuesState);
 
-      if (index < unoptimizableAssignmentIndexes.size() - 1) {
+      if (index < totalAssignments - 1) {
         assignValuesState.output.append(",");
         state.output.append(",");
       }
@@ -122,18 +112,20 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     const auto local = node->as<Luau::AstExprLocal>()->local;
 
     /*
-      Perform a backward search in order to find renamed variables at higher
-      depths. Start at the current depth, localDepth, and go backward,
-      checking each local stack if it has this local variable's name. Stops at
-      the depth of 0, because it is impossible for any node besides from a
-      root AstStatBlock to have a depth of 0.
+      Traverse the function hierachy in order to find renamed local variables at
+      higher function stacks. Start at the current function, if it exists, and
+      go backward in the hierachy, checking each function stack to see if it has
+      this local variable's name. Stops when a stack is found, or when info ==
+      nullptr (a parent of nullptr is the root node).
     */
-    for (size_t depth = localDepth; depth > 0; depth--) {
-      if (state.locals.contains(depth) &&
-          state.locals[depth].contains(local->name.value)) {
-        state.output.append(state.locals[depth][local->name.value]);
+    BlockInfo *info = state.blockInfo;
+    while (info != nullptr) {
+      if (info->locals.contains(local->name.value)) {
+        state.output.append(info->locals[local->name.value]);
         return;
       }
+
+      info = info->parent;
     }
 
     state.output.append("unknown");
@@ -141,15 +133,17 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     const auto assign = node->as<Luau::AstStatAssign>();
     addWhitespaceIfNeeded(state.output);
 
-    State assignedValuesState = State{.output = "",
-                                      .locals = state.locals,
-                                      .totalLocals = state.totalLocals,
-                                      .globals = state.globals,
-                                      .strings = state.strings};
+    State assignedValuesState = State{
+        .output = "",
+        .totalLocals = state.totalLocals,
+        .globals = state.globals,
+        .strings = state.strings,
+        .blockInfo = state.blockInfo,
+    };
 
     for (size_t index = 0; index < assign->values.size; index++) {
       const auto value = assign->values.data[index];
-      handleNode(value, assignedValuesState, localDepth + 1);
+      handleNode(value, assignedValuesState);
       if (index < assign->values.size - 1) {
         assignedValuesState.output.append(",");
       }
@@ -162,7 +156,7 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
         state.totalLocals++;
       }
 
-      handleNode(expr, state, localDepth + 1);
+      handleNode(expr, state);
 
       if (index < assign->vars.size - 1) {
         state.output.append(",");
@@ -229,7 +223,7 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     if (expr->value) {
       state.output.append("true");
     } else {
-      state.output.append("false");
+      state.output.append("1==0"); // false = 5 chars, 1==0 = 4 chars
     }
   } else if (node->is<Luau::AstExprConstantNil>()) {
     state.output.append("nil");
@@ -251,7 +245,7 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
         auto expression = expr->expressions.data[index];
 
         state.output.append("{");
-        handleNode(expression, state, localDepth + 1);
+        handleNode(expression, state);
         state.output.append("}");
       }
     }
@@ -265,11 +259,11 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
       const auto &item = expr->items.data[index];
       if (item.key != nullptr) {
         state.output.append("[");
-        handleNode(item.key, state, localDepth + 1);
+        handleNode(item.key, state);
         state.output.append("]=");
       }
 
-      handleNode(item.value, state, localDepth + 1);
+      handleNode(item.value, state);
 
       if (index < expr->items.size - 1) {
         state.output.append(",");
@@ -280,29 +274,29 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
   } else if (node->is<Luau::AstExprIndexName>()) {
     const auto expr = node->as<Luau::AstExprIndexName>();
 
-    handleNode(expr->expr, state, localDepth + 1);
+    handleNode(expr->expr, state);
     state.output.append(1, expr->op);
     state.output.append(expr->index.value);
   } else if (node->is<Luau::AstStatCompoundAssign>()) {
     const auto expr = node->as<Luau::AstStatCompoundAssign>();
 
-    handleNode(expr->var, state, localDepth + 1);
+    handleNode(expr->var, state);
     state.output.append(compoundSymbols[expr->op]);
     state.output.append("=");
-    handleNode(expr->value, state, localDepth + 1);
+    handleNode(expr->value, state);
 
     addWhitespaceIfNeeded(state.output);
   } else if (node->is<Luau::AstExprUnary>()) {
     const auto unary = node->as<Luau::AstExprUnary>();
 
     state.output.append(compoundSymbols[unary->op]);
-    handleNode(unary->expr, state, localDepth + 1);
+    handleNode(unary->expr, state);
   } else if (node->is<Luau::AstExprBinary>()) {
     const auto binary = node->as<Luau::AstExprBinary>();
 
-    handleNode(binary->left, state, localDepth + 1);
+    handleNode(binary->left, state);
     state.output.append(compoundSymbols[binary->op]);
-    handleNode(binary->right, state, localDepth + 1);
+    handleNode(binary->right, state);
   } else if (node->is<Luau::AstStatIf>()) {
     /*
       This only covers the following snippet:
@@ -312,17 +306,25 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
         <ELSE_BODY_CAN_BE_NULLPTR>
       end
     */
-    const auto if_statement = node->as<Luau::AstStatIf>();
+    const auto ifStatement = node->as<Luau::AstStatIf>();
+
     state.output.append("if ");
-    handleNode(if_statement->condition, state, localDepth + 1);
-
+    handleNode(ifStatement->condition, state);
     addWhitespaceIfNeeded(state.output);
-    state.output.append("then ");
-    handleNode(if_statement->thenbody, state, localDepth + 1);
 
-    if (if_statement->elsebody != nullptr) {
+    BlockInfo thenBlock = {};
+    BlockInfo elseBlock = {};
+
+    state.output.append("then ");
+    callAsChildBlock(state, &thenBlock,
+                     [&] { handleNode(ifStatement->thenbody, state); });
+
+    if (ifStatement->elsebody != nullptr) {
       addWhitespaceIfNeeded(state.output);
-      handleNode(if_statement->elsebody, state, localDepth + 1);
+      state.output.append("else ");
+
+      callAsChildBlock(state, &elseBlock,
+                       [&] { handleNode(ifStatement->elsebody, state); });
     }
 
     addWhitespaceIfNeeded(state.output);
@@ -331,18 +333,18 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     const auto expr = node->as<Luau::AstExprIfElse>();
 
     state.output.append("if ");
-    handleNode(expr->condition, state, localDepth + 1);
+    handleNode(expr->condition, state);
     addWhitespaceIfNeeded(state.output);
     state.output.append("then ");
 
-    handleNode(expr->trueExpr, state, localDepth + 1);
+    handleNode(expr->trueExpr, state);
     if (expr->hasElse) {
       state.output.append(" else");
       state.output.append((expr->falseExpr->is<Luau::AstExprIfElse>() ||
                                    expr->falseExpr->is<Luau::AstStatIf>()
                                ? ""
                                : " "));
-      handleNode(expr->falseExpr, state, localDepth + 1);
+      handleNode(expr->falseExpr, state);
     }
   } else if (node->is<Luau::AstStatLocalFunction>()) {
     const auto local_function = node->as<Luau::AstStatLocalFunction>();
@@ -350,26 +352,27 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     addWhitespaceIfNeeded(state.output);
     state.output.append("local ");
     state.totalLocals++;
-    handleAstLocal(local_function->name, state, localDepth + 1);
+    handleAstLocalAssignment(local_function->name, state);
 
     state.output.append("=");
-    handleNode(local_function->func, state, localDepth + 1);
+    handleNode(local_function->func, state);
   } else if (node->is<Luau::AstStatFunction>()) {
     const auto function = node->as<Luau::AstStatFunction>();
 
     addWhitespaceIfNeeded(state.output);
-    handleNode(function->name, state, localDepth + 1);
+    handleNode(function->name, state);
     state.output.append("=");
-    handleNode(function->func, state, localDepth + 1);
+    handleNode(function->func, state);
   } else if (node->is<Luau::AstExprFunction>()) {
     const auto expr = node->as<Luau::AstExprFunction>();
 
     state.output.append("function(");
 
     for (size_t index = 0; index < expr->args.size; index++) {
-      const auto arg = expr->args.data[index];
+      const auto localFunctionArgument = expr->args.data[index];
+
       state.totalLocals++;
-      handleAstLocal(arg, state, localDepth + 3);
+      handleAstLocalAssignment(localFunctionArgument, state);
 
       if (index < expr->args.size - 1) {
         state.output.append(",");
@@ -384,78 +387,94 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     }
 
     state.output.append(")");
-    handleNode(expr->body, state, localDepth + 1);
+
+    BlockInfo functionBlock = {};
+    callAsChildBlock(state, &functionBlock,
+                     [&] { handleNode(expr->body, state); });
+
     state.output.append("end");
   } else if (node->is<Luau::AstExprIndexExpr>()) {
     const auto expr = node->as<Luau::AstExprIndexExpr>();
     addWhitespaceIfNeeded(state.output);
 
-    handleNode(expr->expr, state, localDepth + 1);
+    handleNode(expr->expr, state);
+
     state.output.append("[");
-    handleNode(expr->index, state, localDepth + 1);
+    handleNode(expr->index, state);
     state.output.append("]");
+
   } else if (node->is<Luau::AstStatWhile>()) {
     const auto while_statement = node->as<Luau::AstStatWhile>();
 
+    BlockInfo whileBlockInfo = {};
+
     addWhitespaceIfNeeded(state.output);
+
     state.output.append("while ");
-    handleNode(while_statement->condition, state, localDepth + 1);
+    handleNode(while_statement->condition, state);
     addWhitespaceIfNeeded(state.output);
     state.output.append("do ");
-    handleNode(while_statement->body, state, localDepth + 1);
+
+    callAsChildBlock(state, &whileBlockInfo,
+                     [&] { handleNode(while_statement->body, state); });
+
     addWhitespaceIfNeeded(state.output);
     state.output.append("end ");
   } else if (node->is<Luau::AstExprGroup>()) {
     const auto group = node->as<Luau::AstExprGroup>();
     state.output.append("(");
-    handleNode(group->expr, state, localDepth + 1);
+    handleNode(group->expr, state);
     state.output.append(")");
   } else if (node->is<Luau::AstStatFor>()) {
-    const auto for_statement = node->as<Luau::AstStatFor>();
+    const auto forStatement = node->as<Luau::AstStatFor>();
 
     addWhitespaceIfNeeded(state.output);
     state.output.append("for ");
     state.totalLocals++;
 
     State forLoopState{.output = "",
-                       .locals = state.locals,
                        .totalLocals = state.totalLocals,
                        .globals = state.globals,
-                       .strings = state.strings};
+                       .strings = state.strings,
+                       .blockInfo = state.blockInfo};
 
-    handleAstLocal(for_statement->var, forLoopState, localDepth + 1);
+    handleAstLocalAssignment(forStatement->var, forLoopState);
     forLoopState.output.append("=");
-    handleNode(for_statement->from, forLoopState, localDepth + 1);
+    handleNode(forStatement->from, forLoopState);
     forLoopState.output.append(",");
-    handleNode(for_statement->to, forLoopState, localDepth + 1);
+    handleNode(forStatement->to, forLoopState);
     forLoopState.output.append(" ");
 
-    if (for_statement->step != nullptr) {
+    if (forStatement->step != nullptr) {
       forLoopState.output.append(",");
-      handleNode(for_statement->step, forLoopState, localDepth + 1);
+      handleNode(forStatement->step, forLoopState);
       forLoopState.output.append(" ");
     }
 
+    BlockInfo forStatementBlockInfo = {};
+
     addWhitespaceIfNeeded(state.output);
     forLoopState.output.append("do ");
-    handleNode(for_statement->body, forLoopState, localDepth + 1);
+
+    callAsChildBlock(state, &forStatementBlockInfo,
+                     [&] { handleNode(forStatement->body, forLoopState); });
+
     addWhitespaceIfNeeded(state.output);
     forLoopState.output.append("end ");
-
     state.output.append(forLoopState.output);
   } else if (node->is<Luau::AstStatForIn>()) {
-    const auto for_in_statement = node->as<Luau::AstStatForIn>();
+    const auto forInStatement = node->as<Luau::AstStatForIn>();
 
     addWhitespaceIfNeeded(state.output);
     state.output.append("for ");
 
-    for (size_t index = 0; index < for_in_statement->vars.size; index++) {
-      auto var = for_in_statement->vars.data[index];
+    for (size_t index = 0; index < forInStatement->vars.size; index++) {
+      auto localVariable = forInStatement->vars.data[index];
       state.totalLocals++;
 
-      handleAstLocal(var, state, localDepth + 1);
+      handleAstLocalAssignment(localVariable, state);
 
-      if (index < for_in_statement->vars.size - 1) {
+      if (index < forInStatement->vars.size - 1) {
         state.output.append(",");
       }
     }
@@ -463,32 +482,39 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
     addWhitespaceIfNeeded(state.output);
     state.output.append("in ");
 
-    for (size_t index = 0; index < for_in_statement->values.size; index++) {
-      const auto value = for_in_statement->values.data[index];
-      handleNode(value, state, localDepth + 1);
-      if (index < for_in_statement->values.size - 1) {
+    for (size_t index = 0; index < forInStatement->values.size; index++) {
+      const auto value = forInStatement->values.data[index];
+      handleNode(value, state);
+      if (index < forInStatement->values.size - 1) {
         state.output.append(",");
       }
     }
 
+    BlockInfo forInStatementBlock = {};
+
     addWhitespaceIfNeeded(state.output);
     state.output.append("do ");
-    handleNode(for_in_statement->body, state, localDepth + 1);
+
+    callAsChildBlock(state, &forInStatementBlock,
+                     [&] { handleNode(forInStatement->body, state); });
+
     addWhitespaceIfNeeded(state.output);
     state.output.append("end ");
+
   } else if (node->is<Luau::AstStatRepeat>()) {
-    const auto repeat_statement = node->as<Luau::AstStatRepeat>();
+    const auto repeatStatement = node->as<Luau::AstStatRepeat>();
 
     addWhitespaceIfNeeded(state.output);
     state.output.append("repeat ");
 
-    for (const auto statement : repeat_statement->body->body) {
-      handleNode(statement, state, localDepth + 1);
-    }
+    BlockInfo repeatStatementBlock = {};
+
+    callAsChildBlock(state, &repeatStatementBlock,
+                     [&] { handleNode(repeatStatement->body, state); });
 
     addWhitespaceIfNeeded(state.output);
     state.output.append("until ");
-    handleNode(repeat_statement->condition, state, localDepth + 1);
+    handleNode(repeatStatement->condition, state);
     addWhitespaceIfNeeded(state.output);
   } else if (node->is<Luau::AstStatBreak>()) {
     addWhitespaceIfNeeded(state.output);
@@ -501,7 +527,7 @@ void handleNode(const Luau::AstNode *node, State &state, size_t localDepth) {
 
     for (size_t index = 0; index < return_statement->list.size; index++) {
       const auto node = return_statement->list.data[index];
-      handleNode(node, state, localDepth + 1);
+      handleNode(node, state);
 
       if (index < return_statement->list.size - 1) {
         state.output.append(",");
@@ -523,13 +549,15 @@ std::string processAstRoot(Luau::AstStatBlock *root) {
   root->visit(&tracking);
 
   Glue glue = initGlue(tracking);
+  BlockInfo rootBlockInfo = {.parent = nullptr};
 
   State state = {.output = glue.init,
                  .totalLocals = glue.nameIndex,
                  .globals = glue.globals,
-                 .strings = glue.strings};
+                 .strings = glue.strings,
+                 .blockInfo = &rootBlockInfo};
 
-  handleNode(root, state, 0);
+  handleNode(root, state);
 
   return state.output;
 }
