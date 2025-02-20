@@ -19,7 +19,6 @@ struct BlockInfo {
 struct State {
   std::string output = "";
 
-  // [depth][node.name] = getLocalName(&state.totalLocals);
   size_t totalLocals = 0;
 
   rename_map &globals;
