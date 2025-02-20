@@ -368,29 +368,33 @@ void handleNode(const Luau::AstNode *node, State &state) {
 
     state.output.append("function(");
 
-    for (size_t index = 0; index < expr->args.size; index++) {
-      const auto localFunctionArgument = expr->args.data[index];
-
-      state.totalLocals++;
-      handleAstLocalAssignment(localFunctionArgument, state);
-
-      if (index < expr->args.size - 1) {
-        state.output.append(",");
-      }
-    }
-
-    if (expr->vararg) {
-      if (expr->args.size > 0) {
-        state.output.append(",");
-      }
-      state.output.append("...");
-    }
-
-    state.output.append(")");
-
     BlockInfo functionBlock = {};
-    callAsChildBlock(state, &functionBlock,
-                     [&] { handleNode(expr->body, state); });
+
+    // handle function arguments and body in same block, to prevent leakage onto
+    // the state's current block info
+    callAsChildBlock(state, &functionBlock, [&] {
+      for (size_t index = 0; index < expr->args.size; index++) {
+        const auto functionArgument = expr->args.data[index];
+
+        state.totalLocals++;
+        handleAstLocalAssignment(functionArgument, state);
+
+        if (index < expr->args.size - 1) {
+          state.output.append(",");
+        }
+      }
+
+      if (expr->vararg) {
+        if (expr->args.size > 0) {
+          state.output.append(",");
+        }
+        state.output.append("...");
+      }
+
+      state.output.append(")");
+
+      handleNode(expr->body, state);
+    });
 
     state.output.append("end");
   } else if (node->is<Luau::AstExprIndexExpr>()) {
