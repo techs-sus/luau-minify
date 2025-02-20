@@ -11,6 +11,8 @@ minifier, licensed freely under the Apache 2.0 license
 - make AstTracking track all uses of locals, make it produce the BlockInfo
   hierachy, and save characters when possible. (example: if fn does not use
   locals a, b, c, d, ..., it can shadow them in order to save characters)
+- use DAG (Directed Acrylic Graph) to optimize out locals and shadow if
+  profitable
 
 ### Building
 

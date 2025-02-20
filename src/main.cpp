@@ -15,7 +15,8 @@
 #include "minifier.h"
 
 static void displayHelp(const char *program_name) {
-  printf("Usage: %s [file]\n", program_name);
+  printf("Usage: %s [file]\nDotviz generator: %s --dotviz [file]\n",
+         program_name, program_name);
 }
 
 static int assertionHandler(const char *expr, const char *file, int line,
@@ -70,12 +71,14 @@ int main(int argc, char **argv) {
   if (argc >= 2 && strcmp(argv[1], "--help") == 0) {
     displayHelp(argv[0]);
     return 0;
+  } else if (argc == 3 && strcmp(argv[2], "--dotviz") == 0) {
+    // don't display help
   } else if (argc < 2) {
     displayHelp(argv[0]);
     return 1;
   }
 
-  const char *name = argv[1];
+  const char *name = (argc == 3) ? argv[2] : argv[1];
   std::string source;
 
   if (strcmp(name, "-") == 0) {
@@ -115,8 +118,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::string output = processAstRoot(parseResult.root);
-  std::cout << output << std::endl;
+  if (argc != 3) {
+    std::cout << processAstRoot(parseResult.root) << std::endl;
+  } else {
+    std::cout << generateDotviz(parseResult.root) << std::endl;
+  }
 
   return 0;
 }

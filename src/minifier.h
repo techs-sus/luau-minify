@@ -9,9 +9,9 @@ typedef ankerl::unordered_dense::map<const char *, std::string> rename_map;
 // Block as in, function bodies, while loop bodies, for loop bodies, do bodies,
 // etc.
 struct BlockInfo {
-  BlockInfo *parent; // NULL if no parent
-  std::vector<BlockInfo *> children;
-  rename_map locals;
+  BlockInfo *parent = nullptr; // NULL if no parent
+  std::vector<BlockInfo *> children = {};
+  rename_map locals = {};
 };
 
 #include "tracking.h"
