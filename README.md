@@ -8,6 +8,9 @@ minifier, licensed freely under the Apache 2.0 license
 - ensure binary uses tailcalls
 - our main focus is safety, stability, and quality. performance is probably not
   good
+- make AstTracking track all uses of locals, make it produce the BlockInfo
+  hierachy, and save characters when possible. (example: if fn does not use
+  locals a, b, c, d, ..., it can shadow them in order to save characters)
 
 ### Building
 

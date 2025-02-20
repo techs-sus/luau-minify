@@ -434,10 +434,11 @@ void handleNode(const Luau::AstNode *node, State &state) {
 
     addWhitespaceIfNeeded(state.output);
     state.output.append("for ");
-    state.totalLocals++;
 
+    // we don't do state.totalLocals++ here because the variable would only be
+    // used in the new state
     State forLoopState{.output = "",
-                       .totalLocals = state.totalLocals,
+                       .totalLocals = state.totalLocals + 1,
                        .globals = state.globals,
                        .strings = state.strings,
                        .blockInfo = state.blockInfo};
@@ -451,13 +452,13 @@ void handleNode(const Luau::AstNode *node, State &state) {
       handleNode(forStatement->from, forLoopState);
       forLoopState.output.append(",");
       handleNode(forStatement->to, forLoopState);
-      forLoopState.output.append(" ");
 
       if (forStatement->step != nullptr) {
         forLoopState.output.append(",");
         handleNode(forStatement->step, forLoopState);
-        forLoopState.output.append(" ");
       }
+
+      forLoopState.output.append(" ");
 
       addWhitespaceIfNeeded(state.output);
       forLoopState.output.append("do ");
@@ -474,39 +475,40 @@ void handleNode(const Luau::AstNode *node, State &state) {
     addWhitespaceIfNeeded(state.output);
     state.output.append("for ");
 
-    for (size_t index = 0; index < forInStatement->vars.size; index++) {
-      auto localVariable = forInStatement->vars.data[index];
-      state.totalLocals++;
-
-      handleAstLocalAssignment(localVariable, state);
-
-      if (index < forInStatement->vars.size - 1) {
-        state.output.append(",");
-      }
-    }
-
-    addWhitespaceIfNeeded(state.output);
-    state.output.append("in ");
-
-    for (size_t index = 0; index < forInStatement->values.size; index++) {
-      const auto value = forInStatement->values.data[index];
-      handleNode(value, state);
-      if (index < forInStatement->values.size - 1) {
-        state.output.append(",");
-      }
-    }
-
+    // handle for in loop arguments and body in same block, to prevent leakage
+    // onto the state's current block info
     BlockInfo forInStatementBlock = {};
+    callAsChildBlock(state, &forInStatementBlock, [&] {
+      for (size_t index = 0; index < forInStatement->vars.size; index++) {
+        auto localVariable = forInStatement->vars.data[index];
+        state.totalLocals++;
 
-    addWhitespaceIfNeeded(state.output);
-    state.output.append("do ");
+        handleAstLocalAssignment(localVariable, state);
 
-    callAsChildBlock(state, &forInStatementBlock,
-                     [&] { handleNode(forInStatement->body, state); });
+        if (index < forInStatement->vars.size - 1) {
+          state.output.append(",");
+        }
+      }
 
-    addWhitespaceIfNeeded(state.output);
-    state.output.append("end ");
+      addWhitespaceIfNeeded(state.output);
+      state.output.append("in ");
 
+      for (size_t index = 0; index < forInStatement->values.size; index++) {
+        const auto value = forInStatement->values.data[index];
+        handleNode(value, state);
+        if (index < forInStatement->values.size - 1) {
+          state.output.append(",");
+        }
+      }
+
+      addWhitespaceIfNeeded(state.output);
+      state.output.append("do ");
+
+      handleNode(forInStatement->body, state);
+
+      addWhitespaceIfNeeded(state.output);
+      state.output.append("end ");
+    });
   } else if (node->is<Luau::AstStatRepeat>()) {
     const auto repeatStatement = node->as<Luau::AstStatRepeat>();
 
