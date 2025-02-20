@@ -442,26 +442,28 @@ void handleNode(const Luau::AstNode *node, State &state) {
                        .strings = state.strings,
                        .blockInfo = state.blockInfo};
 
-    handleAstLocalAssignment(forStatement->var, forLoopState);
-    forLoopState.output.append("=");
-    handleNode(forStatement->from, forLoopState);
-    forLoopState.output.append(",");
-    handleNode(forStatement->to, forLoopState);
-    forLoopState.output.append(" ");
-
-    if (forStatement->step != nullptr) {
-      forLoopState.output.append(",");
-      handleNode(forStatement->step, forLoopState);
-      forLoopState.output.append(" ");
-    }
-
+    // handle for loop arguments and body in same block, to prevent leakage onto
+    // the state's current block info
     BlockInfo forStatementBlockInfo = {};
+    callAsChildBlock(state, &forStatementBlockInfo, [&] {
+      handleAstLocalAssignment(forStatement->var, forLoopState);
+      forLoopState.output.append("=");
+      handleNode(forStatement->from, forLoopState);
+      forLoopState.output.append(",");
+      handleNode(forStatement->to, forLoopState);
+      forLoopState.output.append(" ");
 
-    addWhitespaceIfNeeded(state.output);
-    forLoopState.output.append("do ");
+      if (forStatement->step != nullptr) {
+        forLoopState.output.append(",");
+        handleNode(forStatement->step, forLoopState);
+        forLoopState.output.append(" ");
+      }
 
-    callAsChildBlock(state, &forStatementBlockInfo,
-                     [&] { handleNode(forStatement->body, forLoopState); });
+      addWhitespaceIfNeeded(state.output);
+      forLoopState.output.append("do ");
+
+      handleNode(forStatement->body, forLoopState);
+    });
 
     addWhitespaceIfNeeded(state.output);
     forLoopState.output.append("end ");
