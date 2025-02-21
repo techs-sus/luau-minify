@@ -19,7 +19,7 @@ enum class BlockType {
   IfStatementThen,
   IfStatementElse,
   IfStatementElseif,
-  Do, // or unknown
+  Do,
 };
 
 struct BlockLocalTracking {
