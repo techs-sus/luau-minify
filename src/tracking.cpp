@@ -19,7 +19,7 @@ enum class BlockType {
   IfStatementThen,
   IfStatementElse,
   IfStatementElseif,
-  DoBlock, // or unknown
+  Do, // or unknown
 };
 
 struct BlockLocalTracking {
@@ -93,6 +93,22 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
 
     for (const auto &statement : block->body) {
       traverse(statement, state);
+
+      if (statement->is<Luau::AstStatBlock>()) {
+        // do block
+        BlockInfo *block =
+            new BlockInfo{.parent = state.currentTracking->block};
+
+        BlockLocalTracking *tracking = new BlockLocalTracking{
+            .block = block,
+            .type = BlockType::Do,
+            .dependencies = {},
+            .parent = state.currentTracking,
+            .children = {},
+        };
+
+        trackCall(state, tracking, [&] { traverse(statement, state); });
+      }
     }
 
     return;
@@ -291,10 +307,12 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
         while (ptr != nullptr) {
           elseifs.emplace_back(ptr->thenbody, BlockType::IfStatementElseif);
 
+          if (ptr->elsebody == nullptr) {
+            break;
+          }
+
           if (ptr->elsebody->is<Luau::AstStatIf>()) {
             ptr = ptr->elsebody->as<Luau::AstStatIf>();
-          } else if (ptr == nullptr) {
-            break;
           } else {
             elseifs.emplace_back(ptr->elsebody->as<Luau::AstStatBlock>(),
                                  BlockType::IfStatementElse);
@@ -408,8 +426,8 @@ const std::string blockTypeToString(BlockType type) {
     return "IfStatementElseif";
   case BlockType::LocalFunction:
     return "LocalFunction";
-  case BlockType::DoBlock:
-    return "DoBlock";
+  case BlockType::Do:
+    return "Do";
   default:
     return "Unknown";
   }
@@ -431,29 +449,44 @@ void generateDotvizNode(const BlockLocalTracking *tracking,
   }
 
   output +=
-      "    \"" + nodeId + "\" [shape=Mrecord,label=\"" + name +
+      "    " + nodeId + " [shape=Mrecord,label=\"" + name +
       ((!tracking->block->locals.empty() || !tracking->dependencies.empty())
            ? "|"
            : "");
 
-  // Add local variables to node label
-  for (const auto &local : tracking->block->locals) {
-    output += "local " + std::string(local.first) + "\\n";
+  // add local variables to node label
+  auto locals = tracking->block->locals.values();
+  for (size_t index = 0; index < locals.size(); index++) {
+    const auto &localName = locals[index].first;
+
+    output += "<local_" + nodeId + "_" + localName + ">";
+    output += "local " + std::string(localName);
+    if (index < locals.size() - 1 || !tracking->dependencies.empty()) {
+      output += "|";
+    }
   }
 
-  // Add dependencies information
-  for (const auto &dep : tracking->dependencies) {
-    output += "importUpvalue " + std::string(dep.first) + "\\n";
+  // add dependency information
+  auto deps = tracking->dependencies.values();
+  for (size_t index = 0; index < deps.size(); index++) {
+    const auto dep = deps[index];
+    output += "<dep_" + nodeId + "_" +
+              std::to_string(reinterpret_cast<uintptr_t>(dep.second)) + ">";
+    output += "importUpvalue " + std::string(dep.first);
+
+    if (index < deps.size() - 1) {
+      output += "|";
+    }
   }
 
   output += "\"];\n";
 
-  // Generate edges to children
+  // generate edges to children
   for (const auto *child : tracking->children) {
     std::string childId = std::to_string(reinterpret_cast<uintptr_t>(child));
-    output += "    \"" + nodeId + "\" -> \"" + childId + "\";\n";
+    output += "    " + nodeId + " -> \"" + childId + "\";\n";
 
-    // Recursively process children
+    // recursively process children
     generateDotvizNode(child, output);
   }
 
@@ -463,9 +496,11 @@ void generateDotvizNode(const BlockLocalTracking *tracking,
     if (dependencySource != tracking) {
       std::string dependencyBlockId =
           std::to_string(reinterpret_cast<uintptr_t>(dependencySource));
-      output += "    \"" + nodeId + "\" -> \"" + dependencyBlockId +
-                "\" [style=dashed,color=blue,label=\"  uses " +
-                std::string(dependencyName) + "\"];\n";
+      output += "    ";
+      output += nodeId + ":dep_" + nodeId + "_" + dependencyBlockId + " -> " +
+                dependencyBlockId + ":local_" + dependencyBlockId + "_" +
+                dependencyName + " [style=dashed,color=blue,label=\"  uses " +
+                dependencyName + "\"];\n";
     }
   }
 }
@@ -511,6 +546,8 @@ std::string generateDotviz(Luau::AstStatBlock *node) {
   output += "        \"legend_regular\" [shape=box,label=\"Block\"];\n";
   output += "        \"legend_dependency\" "
             "[shape=box,style=dashed,color=blue,label=\"Dependency\"];\n";
+  output += "        \"legend_regular\" -> \"legend_dependency\" "
+            "[style=dashed,color=blue,label=\"  uses ...\"];\n";
   output += "    }\n\n";
 
   generateDotvizNode(&rootTracking, output);
