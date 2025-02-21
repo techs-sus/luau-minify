@@ -41,4 +41,4 @@ struct Glue {
 };
 
 Glue initGlue(AstTracking &tracking);
-std::string generateDotviz(Luau::AstStatBlock *node);
+std::string generateDot(Luau::AstStatBlock *node);

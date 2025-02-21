@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
   if (argc != 3) {
     std::cout << processAstRoot(parseResult.root) << std::endl;
   } else {
-    std::cout << generateDotviz(parseResult.root) << std::endl;
+    std::cout << generateDot(parseResult.root) << std::endl;
   }
 
   return 0;

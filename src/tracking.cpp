@@ -28,7 +28,8 @@ struct BlockLocalTracking {
   std::string metadata = ""; // empty unless type == LocalFunction or
                              // Function; points to a std::string
   ankerl::unordered_dense::map<const char *, BlockLocalTracking *>
-      dependencies = {}; // locals which are dependent on the block's parent
+      dependencies = {}; // upvalues dependent on locals above this trackings's
+                         // spot in the hierachy
 
   BlockLocalTracking *parent = nullptr;
   std::vector<BlockLocalTracking *> children = {};
@@ -95,7 +96,6 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
       traverse(statement, state);
 
       if (statement->is<Luau::AstStatBlock>()) {
-        // do block
         BlockInfo *block =
             new BlockInfo{.parent = state.currentTracking->block};
 
@@ -433,14 +433,13 @@ const std::string blockTypeToString(BlockType type) {
   }
 }
 
-void generateDotvizNode(const BlockLocalTracking *tracking,
-                        std::string &output) {
-  // Generate unique node identifier
+void generateDotNode(const BlockLocalTracking *tracking, std::string &output) {
+  // generate unique node identifier
   std::string nodeId = std::to_string(reinterpret_cast<uintptr_t>(tracking));
 
-  // Create node with block type and local variables
-  std::string name;
-  name.append(blockTypeToString(tracking->type));
+  // create node with block type and local variables
+  std::string name = blockTypeToString(tracking->type);
+
   if (tracking->type == BlockType::LocalFunction ||
       tracking->type == BlockType::Function) {
     name.append(" (\\\"");
@@ -470,8 +469,9 @@ void generateDotvizNode(const BlockLocalTracking *tracking,
   auto deps = tracking->dependencies.values();
   for (size_t index = 0; index < deps.size(); index++) {
     const auto dep = deps[index];
-    output += "<dep_" + nodeId + "_" +
-              std::to_string(reinterpret_cast<uintptr_t>(dep.second)) + ">";
+    output += "<dep_" +
+              std::to_string(reinterpret_cast<uintptr_t>(dep.second)) + "_" +
+              dep.first + ">";
     output += "importUpvalue " + std::string(dep.first);
 
     if (index < deps.size() - 1) {
@@ -487,7 +487,7 @@ void generateDotvizNode(const BlockLocalTracking *tracking,
     output += "    " + nodeId + " -> \"" + childId + "\";\n";
 
     // recursively process children
-    generateDotvizNode(child, output);
+    generateDotNode(child, output);
   }
 
   // generate edges to dependencies
@@ -497,15 +497,16 @@ void generateDotvizNode(const BlockLocalTracking *tracking,
       std::string dependencyBlockId =
           std::to_string(reinterpret_cast<uintptr_t>(dependencySource));
       output += "    ";
-      output += nodeId + ":dep_" + nodeId + "_" + dependencyBlockId + " -> " +
-                dependencyBlockId + ":local_" + dependencyBlockId + "_" +
-                dependencyName + " [style=dashed,color=blue,label=\"  uses " +
-                dependencyName + "\"];\n";
+      output += nodeId + ":dep_" + dependencyBlockId + "_" + dependencyName +
+                " -> " + dependencyBlockId + ":local_" + dependencyBlockId +
+                "_" + dependencyName +
+                " [style=dashed,color=blue,label=\"  uses " + dependencyName +
+                "\"];\n";
     }
   }
 }
 
-std::string generateDotviz(Luau::AstStatBlock *node) {
+std::string generateDot(Luau::AstStatBlock *node) {
   AstTracking t;
   node->visit(&t);
   Glue glue = initGlue(t);
@@ -550,7 +551,7 @@ std::string generateDotviz(Luau::AstStatBlock *node) {
             "[style=dashed,color=blue,label=\"  uses ...\"];\n";
   output += "    }\n\n";
 
-  generateDotvizNode(&rootTracking, output);
+  generateDotNode(&rootTracking, output);
 
   output += "}\n";
   return output;
