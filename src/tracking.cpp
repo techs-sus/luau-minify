@@ -64,14 +64,13 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
 
   if (auto block = node->as<Luau::AstStatBlock>()) {
     for (const auto &statement : block->body) {
-      traverse(statement, state);
-
       if (statement->is<Luau::AstStatBlock>()) {
         DoBlock *block = new DoBlock();
-        block->parent = state.currentBlock;
-
         trackCallWithBlock(state, block, [&] { traverse(statement, state); });
+        continue;
       }
+
+      traverse(statement, state);
     }
 
     return;
@@ -527,22 +526,21 @@ void generateDotNode(Block *block, std::string &output) {
       const auto &statement = block->statements[statementIndex++];
       std::string statementId =
           std::to_string(reinterpret_cast<uintptr_t>(statement));
-      auto label = statementTypeToString(statement);
+
+      std::string label = statementTypeToString(statement);
       auto fields = getFields(statement);
       if (!fields.empty())
         label.append("|");
-      size_t i = 0;
-      for (const auto &field : fields) {
-        label += field;
-        i++;
-        if (i < fields.size() - 1) {
+
+      for (size_t index = 0; index < fields.size(); index++) {
+        label += fields.at(index);
+        if (index < fields.size() - 1) {
           label += "|";
         }
       }
 
       output += prefix + statementId + " [shape=Mrecord,color=\"" +
-                getStatementColor(statement) + "\",label=\"" +
-                statementTypeToString(statement) + "\"]\n";
+                getStatementColor(statement) + "\",label=\"" + label + "\"]\n";
       output += prefix + last + " -> " + statementId + ";\n";
       last = statementId;
     } else {
@@ -574,10 +572,10 @@ std::string generateDot(Luau::AstStatBlock *node) {
   node->visit(&t);
   Glue glue = initGlue(t);
 
-  RootBlock *block = new RootBlock();
+  RootBlock block = RootBlock();
 
   TrackingState state = {
-      .currentBlock = block,
+      .currentBlock = &block,
   };
 
   traverse(node, state);
@@ -590,10 +588,9 @@ std::string generateDot(Luau::AstStatBlock *node) {
   output += "    node [fontname=\"Helvetica\",style=filled,fillcolor=white];\n";
   output += "    edge [fontname=\"Helvetica\",penwidth=1.2];\n";
 
-  generateDotNode(block, output);
+  generateDotNode(&block, output);
 
   output += "}\n";
-  delete block;
 
   return output;
 }

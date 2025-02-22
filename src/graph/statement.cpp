@@ -28,7 +28,8 @@ const std::vector<std::string> getFields(Statement *statement) {
     for (size_t index = 0; index < locals->vars.size(); index++) {
       std::string str = "";
       str.append(locals->vars[index]->name.value);
-      str.append(" = <expr>");
+      str.append(" = [expression]"); // TODO: display this when we get an
+                                     // expression engine
       fields.emplace_back(str);
     }
   } else if (auto assign = statement->as<AssignStatement>()) {
@@ -47,7 +48,7 @@ const std::vector<std::string> getFields(Statement *statement) {
       };
 
       // TODO: display expression when we get an expression engine
-      fields.emplace_back(variableName + " = <expr>");
+      fields.emplace_back(variableName + " = [expression]");
     }
   } else if (auto stat = statement->as<ExpressionStatement>()) {
     if (auto expr = stat->value->as<Luau::AstExprCall>()) {
