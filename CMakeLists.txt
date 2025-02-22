@@ -25,6 +25,14 @@ target_sources(Minifier PRIVATE
     src/syntax.h
     src/tracking.h
 
+    src/graph/rtti.hpp
+    src/graph/block.hpp
+    src/graph/statement.hpp
+
+    src/graph/rtti.cpp
+    src/graph/block.cpp
+    src/graph/statement.cpp
+
     src/minifier.cpp
     src/syntax.cpp
     src/tracking.cpp

@@ -1,66 +1,38 @@
+#include <Luau/Ast.h>
 #include <algorithm>
 #include <string>
 #include <string_view>
 
-#include "Luau/Ast.h"
 #include "ankerl/unordered_dense.h"
+#include "graph/block.hpp"
+#include "graph/statement.hpp"
+#include "minifier.h"
 #include "syntax.h"
 #include "tracking.h"
 
-enum class BlockType {
-  Root = 0,
-  While,
-  For,
-  ForIn,
-  Repeat,
-  LocalFunction,
-  Function,
-  IfStatement,
-  IfStatementThen,
-  IfStatementElse,
-  IfStatementElseif,
-  Do,
-};
-
-struct BlockLocalTracking {
-  BlockInfo *block = nullptr;
-  BlockType type;
-  std::string metadata = ""; // empty unless type == LocalFunction or
-                             // Function; points to a std::string
-  ankerl::unordered_dense::map<const char *, BlockLocalTracking *>
-      dependencies = {}; // upvalues dependent on locals above this trackings's
-                         // spot in the hierachy
-
-  BlockLocalTracking *parent = nullptr;
-  std::vector<BlockLocalTracking *> children = {};
-};
-
 struct TrackingState {
-  BlockLocalTracking *currentTracking = nullptr;
+  Block *currentBlock = nullptr;
+
   global_usage_map globalUses = global_usage_map();
   string_usage_map stringUses = string_usage_map();
   size_t totalLocals = 0;
 };
 
-void trackAstLocalAssignment(TrackingState &state,
-                             const Luau::AstLocal *local) {
-  const std::string name = getNameAtIndex(++state.totalLocals);
-  state.currentTracking->block->locals[local->name.value] = name;
+void trackAstLocalAssignment(const Luau::AstLocal *local,
+                             TrackingState &state) {
+  state.currentBlock->locals[local->name.value].uses++;
 }
 
-void trackCall(TrackingState &state, BlockLocalTracking *tracking,
-               std::function<void()> closure) {
-  BlockLocalTracking *currentTracking = state.currentTracking;
+void trackCallWithBlock(TrackingState &state, Block *block,
+                        std::function<void()> closure) {
+  Block *current = state.currentBlock;
 
-  currentTracking->children.emplace_back(tracking);
-  currentTracking->block->children.emplace_back(tracking->block);
+  current->pushChild(block);
+  block->parent = current;
 
-  tracking->parent = currentTracking;
-  tracking->block->parent = currentTracking->block;
-
-  state.currentTracking = tracking;
+  state.currentBlock = block;
   closure();
-  state.currentTracking = currentTracking;
+  state.currentBlock = current;
 };
 
 void traverse(const Luau::AstNode *node, TrackingState &state) {
@@ -68,14 +40,15 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
     const auto expr = node->as<Luau::AstExprGlobal>();
     state.globalUses[expr->name.value]++;
 
-    BlockLocalTracking *tracking = state.currentTracking;
+    Block *block = state.currentBlock;
 
-    while (tracking->parent != nullptr) {
-      tracking = tracking->parent;
+    while (block->parent != nullptr) {
+      block = block->parent;
     }
 
-    if (tracking != state.currentTracking)
-      state.currentTracking->dependencies[expr->name.value] = tracking;
+    // root shouldn't depend on itself
+    if (block != state.currentBlock)
+      state.currentBlock->dependencies[expr->name.value] = block;
 
     return;
   }
@@ -89,25 +62,15 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
     return;
   }
 
-  if (node->is<Luau::AstStatBlock>()) {
-    auto block = node->as<Luau::AstStatBlock>();
-
+  if (auto block = node->as<Luau::AstStatBlock>()) {
     for (const auto &statement : block->body) {
       traverse(statement, state);
 
       if (statement->is<Luau::AstStatBlock>()) {
-        BlockInfo *block =
-            new BlockInfo{.parent = state.currentTracking->block};
+        DoBlock *block = new DoBlock();
+        block->parent = state.currentBlock;
 
-        BlockLocalTracking *tracking = new BlockLocalTracking{
-            .block = block,
-            .type = BlockType::Do,
-            .dependencies = {},
-            .parent = state.currentTracking,
-            .children = {},
-        };
-
-        trackCall(state, tracking, [&] { traverse(statement, state); });
+        trackCallWithBlock(state, block, [&] { traverse(statement, state); });
       }
     }
 
@@ -116,6 +79,11 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
 
   if (node->is<Luau::AstStatExpr>()) {
     auto stat = node->as<Luau::AstStatExpr>();
+
+    auto trackingStatement = new ExpressionStatement{};
+    trackingStatement->value = stat->expr;
+    state.currentBlock->pushStatement(trackingStatement);
+
     traverse(stat->expr, state);
     return;
   }
@@ -136,7 +104,7 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
     traverse(expr->body, state);
 
     for (const auto arg : expr->args) {
-      trackAstLocalAssignment(state, arg);
+      trackAstLocalAssignment(arg, state);
     };
 
     return;
@@ -144,168 +112,95 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
 
   if (node->is<Luau::AstExprGroup>()) {
     auto expr = node->as<Luau::AstExprGroup>();
+
     traverse(expr->expr, state);
     return;
   }
 
-  if (node->is<Luau::AstStatWhile>()) {
-    BlockInfo *block = new BlockInfo{.parent = state.currentTracking->block};
+  if (auto stat = node->as<Luau::AstStatWhile>()) {
+    auto *block = new SingleConditionBlock(SingleConditionBlock::Type::While,
+                                           stat->condition);
 
-    BlockLocalTracking *tracking = new BlockLocalTracking{
-        .block = block,
-        .type = BlockType::While,
-        .dependencies = {},
-        .parent = state.currentTracking,
-        .children = {},
-    };
-
-    trackCall(state, tracking,
-              [&] { traverse(node->as<Luau::AstStatWhile>()->body, state); });
-
+    trackCallWithBlock(state, block, [&] { traverse(stat->body, state); });
     return;
   }
 
-  if (node->is<Luau::AstStatFor>()) {
-    BlockInfo *block = new BlockInfo{.parent = state.currentTracking->block};
+  if (auto repeat = node->as<Luau::AstStatRepeat>()) {
+    auto *block = new SingleConditionBlock(SingleConditionBlock::Type::Repeat,
+                                           repeat->condition);
 
-    BlockLocalTracking *tracking = new BlockLocalTracking{
-        .block = block,
-        .type = BlockType::For,
-        .dependencies = {},
-        .parent = state.currentTracking,
-        .children = {},
-    };
-
-    trackCall(state, tracking,
-              [&] { traverse(node->as<Luau::AstStatFor>()->body, state); });
-
+    trackCallWithBlock(state, block, [&] { traverse(repeat->body, state); });
     return;
   }
 
-  if (node->is<Luau::AstStatForIn>()) {
-    BlockInfo *block = new BlockInfo{.parent = state.currentTracking->block};
+  if (auto stat = node->as<Luau::AstStatFor>()) {
+    auto *block = new ForBlock(stat->var, stat->from, stat->to, stat->step);
 
-    BlockLocalTracking *tracking = new BlockLocalTracking{
-        .block = block,
-        .type = BlockType::ForIn,
-        .dependencies = {},
-        .parent = state.currentTracking,
-        .children = {},
-    };
-
-    trackCall(state, tracking,
-              [&] { traverse(node->as<Luau::AstStatForIn>()->body, state); });
-
+    trackCallWithBlock(state, block, [&] { traverse(stat->body, state); });
     return;
   }
 
-  if (node->is<Luau::AstStatRepeat>()) {
-    BlockInfo *block = new BlockInfo{.parent = state.currentTracking->block};
+  if (auto stat = node->as<Luau::AstStatForIn>()) {
+    auto *block = new ForInBlock(&stat->vars, &stat->values);
 
-    BlockLocalTracking *tracking = new BlockLocalTracking{
-        .block = block,
-        .type = BlockType::Repeat,
-        .dependencies = {},
-        .parent = state.currentTracking,
-        .children = {},
-    };
-
-    trackCall(state, tracking,
-              [&] { traverse(node->as<Luau::AstStatRepeat>()->body, state); });
-
+    trackCallWithBlock(state, block, [&] { traverse(stat->body, state); });
     return;
   }
 
-  if (node->is<Luau::AstStatLocalFunction>()) {
-    BlockInfo *block = new BlockInfo{.parent = state.currentTracking->block};
-
-    BlockLocalTracking *tracking = new BlockLocalTracking{
-        .block = block,
-        .type = BlockType::LocalFunction,
-        .dependencies = {},
-        .parent = state.currentTracking,
-        .children = {},
-    };
-
-    auto statement = node->as<Luau::AstStatLocalFunction>();
+  if (auto statement = node->as<Luau::AstStatLocalFunction>()) {
+    auto block =
+        new LocalFunctionBlock{statement->name->name.value,
+                               statement->func->vararg, &statement->func->args};
 
     // ensure this scope can access fn
-    trackAstLocalAssignment(state, statement->name);
-
-    trackCall(state, tracking, [&] {
-      tracking->metadata.append(statement->name->name.value);
-      traverse(statement->func, state);
-    });
+    trackAstLocalAssignment(statement->name, state);
+    trackCallWithBlock(state, block, [&] { traverse(statement->func, state); });
 
     return;
   }
 
-  if (node->is<Luau::AstStatFunction>()) {
-    BlockInfo *block = new BlockInfo{.parent = state.currentTracking->block};
+  if (auto statement = node->as<Luau::AstStatFunction>()) {
+    const char *ptr;
 
-    BlockLocalTracking *tracking = new BlockLocalTracking{
-        .block = block,
-        .type = BlockType::Function,
-        .dependencies = {},
-        .parent = state.currentTracking,
-        .children = {},
-    };
+    if (auto global = statement->name->as<Luau::AstExprGlobal>()) {
+      ptr = global->name.value;
+    } else if (auto local = statement->name->as<Luau::AstExprLocal>()->local) {
+      ptr = local->name.value;
+    } else {
+      ptr = "<idk>";
+    }
 
-    auto statement = node->as<Luau::AstStatFunction>();
+    auto block = new LocalFunctionBlock{ptr, statement->func->vararg,
+                                        &statement->func->args};
 
     traverse(statement->name, state);
-    trackCall(state, tracking, [&] {
-      if (statement->name->is<Luau::AstExprGlobal>()) {
-        tracking->metadata.append(
-            statement->name->as<Luau::AstExprGlobal>()->name.value);
-      } else if (statement->name->is<Luau::AstExprLocal>()) {
-        tracking->metadata.append(
-            statement->name->as<Luau::AstExprLocal>()->local->name.value);
-      }
-
-      traverse(statement->func, state);
-    });
+    trackCallWithBlock(state, block, [&] { traverse(statement->func, state); });
 
     return;
   }
 
-  if (node->is<Luau::AstStatIf>()) {
-    BlockInfo *block = new BlockInfo{.parent = state.currentTracking->block};
+  if (auto statement = node->as<Luau::AstStatIf>()) {
+    auto block = new IfStatementBlock();
 
-    BlockLocalTracking *tracking = new BlockLocalTracking{
-        .block = block,
-        .type = BlockType::IfStatement,
-        .dependencies = {},
-        .parent = state.currentTracking,
-        .children = {},
-    };
+    trackCallWithBlock(state, block, [&] {
+      auto thenBlock = new IfBlock();
+      thenBlock->type = IfBlock::Type::Then;
 
-    auto statement = node->as<Luau::AstStatIf>();
+      block->thenBody = thenBlock;
 
-    trackCall(state, tracking, [&] {
-      BlockInfo *truthyBlock = new BlockInfo{.parent = block};
-
-      BlockLocalTracking *truthyTracking = new BlockLocalTracking{
-          .block = truthyBlock,
-          .type = BlockType::IfStatementThen,
-          .dependencies = {},
-          .parent = tracking,
-          .children = {},
-      };
-
-      trackCall(state, truthyTracking,
-                [&] { traverse(statement->thenbody, state); });
+      trackCallWithBlock(state, thenBlock,
+                         [&] { traverse(statement->thenbody, state); });
 
       if (statement->elsebody == nullptr) {
         return;
       };
 
       if (statement->elsebody->is<Luau::AstStatIf>()) {
-        std::vector<std::pair<Luau::AstStatBlock *, BlockType>> elseifs;
+        std::vector<std::pair<Luau::AstStatBlock *, Luau::AstExpr *>> elseifs;
         Luau::AstStatIf *ptr = statement->elsebody->as<Luau::AstStatIf>();
 
         while (ptr != nullptr) {
-          elseifs.emplace_back(ptr->thenbody, BlockType::IfStatementElseif);
+          elseifs.emplace_back(ptr->thenbody, ptr->condition);
 
           if (ptr->elsebody == nullptr) {
             break;
@@ -315,52 +210,108 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
             ptr = ptr->elsebody->as<Luau::AstStatIf>();
           } else {
             elseifs.emplace_back(ptr->elsebody->as<Luau::AstStatBlock>(),
-                                 BlockType::IfStatementElse);
+                                 nullptr);
             break;
           };
         }
 
-        for (const auto &[node, blockType] : elseifs) {
-          BlockInfo *unknownBlock = new BlockInfo{.parent = block};
+        for (const auto &[node, condition] : elseifs) {
+          auto newBlock = new IfBlock();
 
-          BlockLocalTracking *unknownTracking = new BlockLocalTracking{
-              .block = unknownBlock,
-              .type = blockType,
-              .dependencies = {},
-              .parent = tracking,
-              .children = {},
-          };
+          if (condition == nullptr) {
+            newBlock->type = IfBlock::Type::Else;
+            block->elseBody = newBlock;
+          } else {
+            newBlock->type = IfBlock::Type::Elseif;
+            block->elseifs.emplace_back(newBlock, condition);
+          }
 
-          trackCall(state, unknownTracking, [&] { traverse(node, state); });
+          trackCallWithBlock(state, newBlock, [&] { traverse(node, state); });
         };
         return;
       } else {
-        BlockInfo *elseBlock = new BlockInfo{.parent = block};
+        auto elseBlock = new IfBlock();
+        elseBlock->type = IfBlock::Type::Else;
+        block->elseBody = elseBlock;
 
-        BlockLocalTracking *elseTracking = new BlockLocalTracking{
-            .block = elseBlock,
-            .type = BlockType::IfStatementElse,
-            .dependencies = {},
-            .parent = tracking,
-            .children = {},
-        };
-
-        trackCall(state, elseTracking,
-                  [&] { traverse(statement->elsebody, state); });
+        trackCallWithBlock(state, elseBlock,
+                           [&] { traverse(statement->elsebody, state); });
       };
     });
 
     return;
   };
 
-  if (node->is<Luau::AstStatLocal>()) {
-    auto local = node->as<Luau::AstStatLocal>();
+  if (auto assign = node->as<Luau::AstStatAssign>()) {
+    auto assignStatement = new AssignStatement();
+
+    const size_t assignments = std::min(assign->values.size, assign->vars.size);
+    for (size_t index = 0; index < assignments; index++) {
+      const auto var = assign->vars.data[index];
+      const auto value = assign->values.data[index];
+
+      assignStatement->vars.emplace_back(var);
+      assignStatement->values.emplace_back(value);
+
+      traverse(var, state);
+      traverse(value, state);
+    }
+
+    state.currentBlock->pushStatement(assignStatement);
+
+    return;
+  }
+
+  if (node->is<Luau::AstStatReturn>()) {
+    auto ret = node->as<Luau::AstStatReturn>();
+
+    auto trackingStatement = new ReturnStatement{};
+
+    for (const auto value : ret->list) {
+      trackingStatement->values.emplace_back(value);
+      traverse(value, state);
+    }
+
+    state.currentBlock->pushStatement(trackingStatement);
+    return;
+  }
+
+  if (node->is<Luau::AstStatBreak>()) {
+    auto breakStatement = new BreakStatement{};
+    state.currentBlock->pushStatement(breakStatement);
+    return;
+  }
+
+  if (node->is<Luau::AstStatContinue>()) {
+    auto continueStatement = new ContinueStatement{};
+    state.currentBlock->pushStatement(continueStatement);
+    return;
+  }
+
+  if (auto assign = node->as<Luau::AstStatCompoundAssign>()) {
+    auto compoundAssignStatement = new CompoundAssignStatement{};
+    compoundAssignStatement->op = assign->op;
+    compoundAssignStatement->var = assign->var;
+    compoundAssignStatement->value = assign->value;
+    state.currentBlock->pushStatement(compoundAssignStatement);
+
+    traverse(assign->var, state);
+    traverse(assign->value, state);
+
+    return;
+  }
+
+  if (auto local = node->as<Luau::AstStatLocal>()) {
+    auto localAssignStatement = new LocalAssignStatement{};
 
     const size_t assignments = std::min(local->values.size, local->vars.size);
 
     for (size_t index = 0; index < assignments; index++) {
       const auto var = local->vars.data[index];
       const auto value = local->values.data[index];
+
+      localAssignStatement->vars.emplace_back(var);
+      localAssignStatement->values.emplace_back(value);
 
       if (value->is<Luau::AstExprFunction>()) {
         auto localFunction = Luau::AstStatLocalFunction(
@@ -369,137 +320,249 @@ void traverse(const Luau::AstNode *node, TrackingState &state) {
         continue;
       };
 
-      trackAstLocalAssignment(state, var);
-      traverse(local->values.data[index], state);
+      trackAstLocalAssignment(var, state);
+      traverse(value, state);
     }
 
+    state.currentBlock->pushStatement(localAssignStatement);
     return;
   };
 
-  if (node->is<Luau::AstExprLocal>()) {
-    auto local = node->as<Luau::AstExprLocal>()->local;
-
-    const char *localName = local->name.value;
+  if (auto local = node->as<Luau::AstExprLocal>()) {
+    const char *localName = local->local->name.value;
     // not in current scope, find the scope
 
-    if (state.currentTracking->block->locals.contains(localName) ||
-        state.currentTracking->dependencies.contains(localName)) {
+    if (state.currentBlock->locals.contains(localName) ||
+        state.currentBlock->dependencies.contains(localName)) {
       return;
     };
 
-    BlockLocalTracking *tracking = state.currentTracking;
+    Block *block = state.currentBlock;
 
-    while (tracking != nullptr) {
-      if (tracking->block->locals.contains(localName)) {
-        state.currentTracking->dependencies[localName] = tracking;
+    while (block != nullptr) {
+      if (block->locals.contains(localName)) {
+        state.currentBlock->dependencies[localName] = block;
         return;
       }
 
-      tracking = tracking->parent;
+      block = block->parent;
     }
 
     return;
   }
 }
 
-const std::string blockTypeToString(BlockType type) {
-  switch (type) {
-  case BlockType::Root:
+const std::string blockTypeToString(Block *type) {
+  if (type->is<RootBlock>()) {
     return "Root";
-  case BlockType::While:
-    return "While";
-  case BlockType::For:
-    return "For";
-  case BlockType::ForIn:
-    return "ForIn";
-  case BlockType::Repeat:
-    return "Repeat";
-  case BlockType::Function:
-    return "Function";
-  case BlockType::IfStatement:
+  } else if (auto block = type->as<SingleConditionBlock>()) {
+    if (block->type == SingleConditionBlock::Type::While) {
+      return "While";
+    } else if (block->type == SingleConditionBlock::Type::Repeat) {
+      return "Repeat";
+    }
+
+    return "unknown";
+  } else if (type->is<IfStatementBlock>()) {
     return "IfStatement";
-  case BlockType::IfStatementThen:
-    return "IfStatementTruthy";
-  case BlockType::IfStatementElse:
-    return "IfStatementFalsy";
-  case BlockType::IfStatementElseif:
-    return "IfStatementElseif";
-  case BlockType::LocalFunction:
+  } else if (type->is<IfBlock>()) {
+    switch (type->as<IfBlock>()->type) {
+    case IfBlock::Type::Then:
+      return "IfStatementTruthy";
+    case IfBlock::Type::Else:
+      return "IfStatementFalsy";
+    case IfBlock::Type::Elseif:
+      return "IfStatementElseif";
+    default:
+      return "IfStatementUnknown";
+    }
+  } else if (type->is<LocalFunctionBlock>()) {
     return "LocalFunction";
-  case BlockType::Do:
+  } else if (type->is<FunctionBlock>()) {
+    return "Function";
+  } else if (type->is<ForBlock>()) {
+    return "For";
+  } else if (type->is<ForInBlock>()) {
+    return "ForIn";
+  } else if (type->is<DoBlock>()) {
     return "Do";
-  default:
-    return "Unknown";
   }
+  return "Unknown";
 }
 
-void generateDotNode(const BlockLocalTracking *tracking, std::string &output) {
-  // generate unique node identifier
-  std::string nodeId = std::to_string(reinterpret_cast<uintptr_t>(tracking));
-
-  // create node with block type and local variables
-  std::string name = blockTypeToString(tracking->type);
-
-  if (tracking->type == BlockType::LocalFunction ||
-      tracking->type == BlockType::Function) {
-    name.append(" (\\\"");
-    name.append(tracking->metadata);
-    name.append("\\\")");
+const std::string getBlockColor(Block *type) {
+  // basic structural blocks - bold base colors
+  if (type->is<RootBlock>()) {
+    return "#FF1493"; // deep pink
+  } else if (type->is<DoBlock>()) {
+    return "#FF4500"; // orange red
   }
 
-  output +=
-      "    " + nodeId + " [shape=Mrecord,label=\"" + name +
-      ((!tracking->block->locals.empty() || !tracking->dependencies.empty())
-           ? "|"
-           : "");
+  // loop blocks - electric purples/pinks
+  else if (type->is<SingleConditionBlock>()) {
+    return "#8A2BE2"; // blue violet
+  } else if (type->is<ForBlock>()) {
+    return "#9400D3"; // dark violet
+  } else if (type->is<ForInBlock>()) {
+    return "#FF00FF"; // magenta
+  }
+  // function blocks - bright yellows/oranges
+  else if (type->is<FunctionBlock>()) {
+    return "#FFD700"; // gold
+  } else if (type->is<LocalFunctionBlock>()) {
+    return "#FFA500"; // orange
+  }
+
+  // conditional blocks - vivid greens/cyans
+  else if (type->is<IfStatementBlock>()) {
+    return "#00FF00"; // lime
+  }
+
+  return "#FF69B4"; // hot pink (default)
+}
+
+const std::string getStatementColor(Statement *type) {
+  // assignment statements - electric neons
+  if (type->is<AssignStatement>()) {
+    return "#39FF14"; // neon green
+  } else if (type->is<LocalAssignStatement>()) {
+    return "#00FF00"; // lime green
+  } else if (type->is<CompoundAssignStatement>()) {
+    return "#7FFF00"; // electric chartreuse
+  }
+
+  // control flow statements - electric blues/purples
+  else if (type->is<BreakStatement>()) {
+    return "#00FFFF"; // electric cyan
+  } else if (type->is<ContinueStatement>()) {
+    return "#1F51FF"; // electric blue
+  } else if (type->is<ReturnStatement>()) {
+    return "#FF00FF"; // electric magenta
+  }
+
+  // other statements
+  else if (type->is<ExpressionStatement>()) {
+    return "#FF10F0"; // hot magenta
+  }
+
+  return "#FF2E89"; // electric rose (default)
+}
+
+const std::string statementTypeToString(Statement *type) {
+  if (type->is<AssignStatement>()) {
+    return "Assign";
+  } else if (type->is<LocalAssignStatement>()) {
+    return "LocalAssign";
+  } else if (type->is<CompoundAssignStatement>()) {
+    return "CompoundAssign";
+  } else if (type->is<BreakStatement>()) {
+    return "Break";
+  } else if (type->is<ContinueStatement>()) {
+    return "Continue";
+  } else if (type->is<ReturnStatement>()) {
+    return "Return";
+  } else if (type->is<ExpressionStatement>()) {
+    return "Expression";
+  }
+  return "Unknown";
+}
+
+void generateDotNode(Block *block, std::string &output) {
+  // generate unique node identifier
+  std::string nodeId = std::to_string(reinterpret_cast<uintptr_t>(block));
+  std::string nodeDefinition = blockTypeToString(block);
+
+  if (block->is<LocalFunctionBlock>() || block->is<FunctionBlock>()) {
+    FunctionBlock *fn = static_cast<FunctionBlock *>(block);
+
+    nodeDefinition.append(" (\\\"");
+    nodeDefinition.append(fn->name);
+    nodeDefinition.append("\\\")");
+  }
+
+  const auto color = getBlockColor(block);
+  std::string prefix = "    ";
+  nodeDefinition.insert(0, prefix + nodeId + " [shape=Mrecord," + "color=\"" +
+                               color + "\"," + "label=\"");
+
+  if (!block->locals.empty() || !block->dependencies.empty()) {
+    nodeDefinition += "|";
+  }
 
   // add local variables to node label
-  auto locals = tracking->block->locals.values();
+  auto locals = block->locals.values();
   for (size_t index = 0; index < locals.size(); index++) {
     const auto &localName = locals[index].first;
 
-    output += "<local_" + nodeId + "_" + localName + ">";
-    output += "local " + std::string(localName);
-    if (index < locals.size() - 1 || !tracking->dependencies.empty()) {
-      output += "|";
+    nodeDefinition += "<local_" + nodeId + "_" + localName + ">";
+    nodeDefinition += "local " + std::string(localName);
+    if (index < locals.size() - 1 || !block->dependencies.empty()) {
+      nodeDefinition += "|";
     }
   }
 
   // add dependency information
-  auto deps = tracking->dependencies.values();
+  auto deps = block->dependencies.values();
   for (size_t index = 0; index < deps.size(); index++) {
     const auto dep = deps[index];
-    output += "<dep_" +
-              std::to_string(reinterpret_cast<uintptr_t>(dep.second)) + "_" +
-              dep.first + ">";
-    output += "importUpvalue " + std::string(dep.first);
+    nodeDefinition += "<dep_" +
+                      std::to_string(reinterpret_cast<uintptr_t>(dep.second)) +
+                      "_" + dep.first + ">";
+    nodeDefinition += "importUpvalue " + std::string(dep.first);
 
     if (index < deps.size() - 1) {
-      output += "|";
+      nodeDefinition += "|";
     }
   }
 
-  output += "\"];\n";
+  nodeDefinition += "\"];\n";
 
-  // generate edges to children
-  for (const auto *child : tracking->children) {
-    std::string childId = std::to_string(reinterpret_cast<uintptr_t>(child));
-    output += "    " + nodeId + " -> \"" + childId + "\";\n";
+  output += nodeDefinition;
+  std::string last = nodeId;
+  size_t statementIndex = 0;
+  size_t childIndex = 0;
 
-    // recursively process children
-    generateDotNode(child, output);
+  for (const bool &isStatement : block->order) {
+    if (isStatement) {
+      const auto &statement = block->statements[statementIndex++];
+      std::string statementId =
+          std::to_string(reinterpret_cast<uintptr_t>(statement));
+      auto label = statementTypeToString(statement);
+      auto fields = getFields(statement);
+      if (!fields.empty())
+        label.append("|");
+      size_t i = 0;
+      for (const auto &field : fields) {
+        label += field;
+        i++;
+        if (i < fields.size() - 1) {
+          label += "|";
+        }
+      }
+
+      output += prefix + statementId + " [shape=Mrecord,color=\"" +
+                getStatementColor(statement) + "\",label=\"" +
+                statementTypeToString(statement) + "\"]\n";
+      output += prefix + last + " -> " + statementId + ";\n";
+      last = statementId;
+    } else {
+      // block
+      const auto &child = block->children[childIndex++];
+      std::string childId = std::to_string(reinterpret_cast<uintptr_t>(child));
+      generateDotNode(child, output);
+
+      output += prefix + last + " -> " + childId + ";\n";
+      last = childId;
+    }
   }
-
   // generate edges to dependencies
-  for (const auto &[dependencyName, dependencySource] :
-       tracking->dependencies) {
-    if (dependencySource != tracking) {
+  for (const auto &[dependencyName, dependencySource] : block->dependencies) {
+    if (dependencySource != block) {
       std::string dependencyBlockId =
           std::to_string(reinterpret_cast<uintptr_t>(dependencySource));
-      output += "    ";
-      output += nodeId + ":dep_" + dependencyBlockId + "_" + dependencyName +
-                " -> " + dependencyBlockId + ":local_" + dependencyBlockId +
-                "_" + dependencyName +
+      output += prefix + nodeId + ":dep_" + dependencyBlockId + "_" +
+                dependencyName + " -> " + dependencyBlockId + ":local_" +
+                dependencyBlockId + "_" + dependencyName +
                 " [style=dashed,color=blue,label=\"  uses " + dependencyName +
                 "\"];\n";
     }
@@ -511,23 +574,10 @@ std::string generateDot(Luau::AstStatBlock *node) {
   node->visit(&t);
   Glue glue = initGlue(t);
 
-  BlockInfo rootBlock = {
-      .parent = nullptr,
-      .children = {},
-      .locals = glue.globals,
-  };
-
-  BlockLocalTracking rootTracking = {
-      .block = &rootBlock,
-      .type = BlockType::Root,
-      .metadata = "",
-      .dependencies = {},
-      .parent = nullptr,
-      .children = {},
-  };
+  RootBlock *block = new RootBlock();
 
   TrackingState state = {
-      .currentTracking = &rootTracking,
+      .currentBlock = block,
   };
 
   traverse(node, state);
@@ -536,24 +586,15 @@ std::string generateDot(Luau::AstStatBlock *node) {
 
   // graph-wide settings
   output += "    rankdir=LR;\n"; // left -> right graph
-  output += "    node [fontname=\"Helvetica\"];\n";
-  output += "    edge [fontname=\"Helvetica\"];\n";
+  output += "    compound=true;\n";
+  output += "    node [fontname=\"Helvetica\",style=filled,fillcolor=white];\n";
+  output += "    edge [fontname=\"Helvetica\",penwidth=1.2];\n";
 
-  // graph legend
-  output += "    subgraph cluster_legend {\n";
-  output += "        label=\"Legend\";\n";
-  output += "        fontname=\"Helvetica\";\n";
-  output += "        style=dashed;\n";
-  output += "        \"legend_regular\" [shape=box,label=\"Block\"];\n";
-  output += "        \"legend_dependency\" "
-            "[shape=box,style=dashed,color=blue,label=\"Dependency\"];\n";
-  output += "        \"legend_regular\" -> \"legend_dependency\" "
-            "[style=dashed,color=blue,label=\"  uses ...\"];\n";
-  output += "    }\n\n";
-
-  generateDotNode(&rootTracking, output);
+  generateDotNode(block, output);
 
   output += "}\n";
+  delete block;
+
   return output;
 }
 
